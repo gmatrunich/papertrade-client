@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly Papertrade protocol drift check
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

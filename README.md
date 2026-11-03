@@ -78,6 +78,7 @@ uv run papertrade keygen --out .env   # a fresh wallet used only for Papertrade;
 | `PAPERTRADE_DAILY_LOSS_LIMIT_USD` | `10` | realised loss that blocks new opens, counted from the first account update seen each UTC day |
 | `PAPERTRADE_SNAPSHOT_MAX_AGE_S` | `30` | refuse opens when the account stream has been silent this long |
 | `PAPERTRADE_SESSION_RENEW_BEFORE_H` | `72` | `trader.session.maybe_renew()` registers a new key when the active one has less left |
+| `PAPERTRADE_TELEGRAM_BOT_TOKEN`, `PAPERTRADE_TELEGRAM_CHAT_ID` | unset | where `papertrade watchdog` sends alerts; stdout without them |
 
 Export the file before running commands, e.g. `set -a; . ./.env; set +a`.
 
@@ -152,6 +153,31 @@ It compares the live protocol with [`pinned.json`](src/papertrade_client/pinned.
 
 A GitHub Actions workflow runs it daily and opens (or updates) an issue labelled `protocol-drift`.
 After adapting the client to a change, re-pin with `papertrade drift --pin` and commit `pinned.json`.
+
+## Running on a server
+
+`deploy/install.sh` installs two systemd user timers on Linux. Both read `~/.config/papertrade/env` (mode 0600)
+and share the default data directory:
+
+| Timer | Runs | Does |
+| --- | --- | --- |
+| `papertrade-drift` | hourly | `papertrade drift --kill-on-breaking`, report saved as `drift.json` in the data directory |
+| `papertrade-watchdog` | every 2 minutes | `papertrade watchdog`: alerts to Telegram when a problem appears or clears |
+
+The watchdog reports: account stream unavailable or silent, kill switch engaged, Papertrade paused, session
+key missing or expiring, an open accepted by the relayer but not on the stream after 5 minutes, a position
+with less than 30% of the entry-to-bust distance left, and drift warnings or a drift report older than 3 hours.
+Upstream errors alert only when they persist for two runs. A daily summary at 07:00 UTC doubles as a
+heartbeat; `papertrade watchdog --test` sends it now.
+
+```bash
+git clone https://github.com/gmatrunich/papertrade-client && cd papertrade-client
+mkdir -p -m 700 ~/.config/papertrade
+uv run papertrade keygen --out ~/.config/papertrade/env
+grep -v PRIVATE_KEY .env.example >> ~/.config/papertrade/env   # then set the Telegram variables
+deploy/install.sh                                              # again after every `git pull`
+journalctl --user -u papertrade-watchdog -n 20
+```
 
 ## Development
 

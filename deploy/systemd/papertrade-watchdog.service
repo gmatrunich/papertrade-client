@@ -1,0 +1,12 @@
+[Unit]
+Description=Papertrade watchdog (Telegram alerts)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=@REPO@
+Environment=PAPERTRADE_DATA_DIR=%h/.local/share/papertrade-client
+EnvironmentFile=%h/.config/papertrade/env
+ExecStart=@REPO@/.venv/bin/papertrade watchdog
+TimeoutStartSec=2min

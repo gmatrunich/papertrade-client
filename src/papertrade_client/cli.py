@@ -251,6 +251,15 @@ def _drift(args: argparse.Namespace) -> int:
     return report.exit_code()
 
 
+def cmd_watchdog(args: argparse.Namespace) -> int:
+    from . import watchdog
+    from .config import data_dir
+
+    result = watchdog.run(Path(data_dir()), watchdog.Notifier.from_env(), watchdog.observe(), test_message=args.test)
+    _print(result)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="papertrade", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -322,6 +331,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pin", action="store_true", help="write the live protocol as the new baseline")
     p.add_argument("--kill-on-breaking", action="store_true", help="engage the local kill switch on breaking drift")
     p.set_defaults(fn=cmd_drift)
+
+    p = sub.add_parser("watchdog", help="health check; alerts to Telegram when a problem appears or clears")
+    p.add_argument("--test", action="store_true", help="also send the daily summary now")
+    p.set_defaults(fn=cmd_watchdog)
     return parser
 
 
