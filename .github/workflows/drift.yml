@@ -1,0 +1,69 @@
+name: protocol-drift
+
+on:
+  schedule:
+    - cron: "17 5 * * *" # daily, 05:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: protocol-drift
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - run: uv sync --frozen
+
+      - name: Compare the live protocol with pinned.json
+        id: drift
+        run: |
+          set +e
+          uv run papertrade drift --json drift.json --markdown drift.md
+          code=$?
+          if [ "$code" = 3 ]; then
+            # A source could not be observed; retry once before calling it.
+            sleep 120
+            uv run papertrade drift --json drift.json --markdown drift.md
+            code=$?
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          [ -f drift.md ] || printf '## Papertrade protocol drift: **error**\n\nThe monitor produced no report (exit %s).\n' "$code" > drift.md
+          cat drift.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: drift-report
+          path: drift.json
+          if-no-files-found: ignore
+
+      - name: Open or update the drift issue
+        if: always() && steps.drift.outputs.code != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CODE: ${{ steps.drift.outputs.code }}
+        run: |
+          case "$CODE" in
+            1) title="Protocol drift: review needed" ;;
+            2) title="Protocol drift: BREAKING, client update required" ;;
+            *) title="Protocol drift monitor could not observe the live protocol" ;;
+          esac
+          gh label create protocol-drift --color B60205 --description "Papertrade protocol changed" --force
+          body="$(cat drift.md 2>/dev/null || echo 'The drift monitor did not run.')"$'\n\n'"Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          existing=$(gh issue list --label protocol-drift --state open --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --title "$title"
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --label protocol-drift --body "$body"
+          fi

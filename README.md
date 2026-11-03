@@ -1,0 +1,166 @@
+# papertrade-client
+
+Unofficial Python client for [papertrade.xyz](https://papertrade.xyz): synthetic BTC/ETH perps on
+Hyperliquid's HyperEVM, up to 1000×. It reads market and account state, signs intents, enforces risk
+limits before signing, submits through Papertrade's relayer, and checks every day whether the protocol has
+changed under it.
+
+> **Papertrade is real money.** Despite the name, positions are funded with real USDC and settle
+> against the protocol's LP. This project is not affiliated with Papertrade. Use a dedicated wallet and
+> amounts you can lose.
+
+No strategy logic lives here. A strategy imports the client (or drives the CLI) and decides what to trade.
+
+## How it talks to Papertrade
+
+Papertrade has no documented trading API, but its docs allow third-party frontends: they produce the
+same EIP-712 intents as papertrade.xyz and send them through Papertrade's relayer, which batches them
+on-chain. This client does exactly that.
+
+| Concern | Mechanism |
+| --- | --- |
+| Market / protocol state | `GET /state/trading`, `/query/protocol/*`, `/query/notices` |
+| Account state | server-sent events `GET /state/user/live?wallet=…`: snapshot, patches, 10 s heartbeat |
+| Open / close / cancel | `POST /intents {action, signed}`, signed by a **session key** |
+| Session key | `RegisterSessionKey` signed by the **wallet**, 30-day expiry |
+| Withdraw | `WithdrawToCore` signed by the wallet; amount in 6-decimal USDC |
+| Prices | Hyperliquid `l2Book` best bid/ask; Papertrade fills at the BBO mid of the block that executes the batch |
+| Deposits | per-user CREATE2 proxy on HyperCore, cross-checked against the factory on-chain |
+
+### Verified against live transactions
+
+The relayer submits every intent through the BatchExecutor contract, so recent HyperEVM blocks are a
+free test vector. `papertrade_client.onchain` decodes those batches, re-derives each EIP-712 digest with
+this client's encoding, recovers the signer and checks that the resulting intent id equals the one the
+relayer recorded. On 2026-11-03 all 433 calls in 1,000 blocks verified, covering every intent type
+(`OpenPosition`, `Close`, `RegisterSessionKey`, `WithdrawToCore`, `Stake`, `Unstake`, `Claim`,
+`Distribute`). The same check runs in the daily drift monitor, and captured calls of each type are kept
+in [`tests/fixtures/onchain_vectors.json`](tests/fixtures/onchain_vectors.json) as an offline regression
+test (`scripts/capture_vectors.py` refreshes them).
+
+### Protocol facts worth knowing
+
+- Minimum margin $10, minimum position value (margin × leverage) $500, at most $10M per position and an
+  account open-interest cap (live values: `papertrade markets`).
+- Market orders only: open, or close in full. No stop-loss or take-profit orders; exits are the client's job.
+- Liquidation is a hard bust about 4.8 bps before zero equity and forfeits the whole margin. Since contract
+  set 2, your own close at or past the bust price settles as a liquidation too.
+- Winning closes pay: deadband (0.2 bps), holdback band, impact haircut (at most 90% kept), 2% win fee.
+  The holdback band is 0.75–6 bps on the standard curve and 0.3–10 bps on the off-hours curve that a keeper
+  switches on at weekends and quiet hours. `papertrade_client.payout` implements this and reproduces the
+  numbers in the docs.
+- Only the relayer can submit opens and closes. While it is down positions cannot be closed, but the
+  liquidation keeper keeps running.
+
+## Install
+
+```bash
+git clone https://github.com/gmatrunich/papertrade-client && cd papertrade-client
+uv sync
+uv run papertrade markets        # no wallet needed
+```
+
+## Configure
+
+```bash
+uv run papertrade keygen --out .env   # a fresh wallet used only for Papertrade; written 0600
+```
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PAPERTRADE_WALLET_PRIVATE_KEY` | required | dedicated wallet; signs session-key registrations and withdrawals |
+| `PAPERTRADE_DATA_DIR` | `~/.local/share/papertrade-client` | session keys, nonce counters, kill switch, `audit.jsonl`. Back it up. Every process trading this wallet must share it |
+| `PAPERTRADE_LIVE_TRADING` | `false` | `false` makes every signed write a dry run |
+| `PAPERTRADE_MAX_MARGIN_USD` | `10` | per-trade margin cap |
+| `PAPERTRADE_MAX_LEVERAGE` | `50` | leverage cap |
+| `PAPERTRADE_MAX_OPEN_POSITIONS` | `1` | open + pending + submitted-but-not-yet-visible opens |
+| `PAPERTRADE_MAX_TOTAL_MARGIN_USD` | `10` | margin across all positions |
+| `PAPERTRADE_DAILY_LOSS_LIMIT_USD` | `10` | realised loss that blocks new opens, counted from the first account update seen each UTC day |
+| `PAPERTRADE_SNAPSHOT_MAX_AGE_S` | `30` | refuse opens when the account stream has been silent this long |
+| `PAPERTRADE_SESSION_RENEW_BEFORE_H` | `72` | `trader.session.maybe_renew()` registers a new key when the active one has less left |
+
+Export the file before running commands, e.g. `set -a; . ./.env; set +a`.
+
+## Use
+
+```bash
+uv run papertrade status                      # account, session, limits, mode
+uv run papertrade quote BTC long 10 50        # bust price and payout curve
+uv run papertrade open BTC long 10 50         # dry run: guards + an unsigned preview
+uv run papertrade open BTC long 10 50 --live  # live only with PAPERTRADE_LIVE_TRADING=true
+uv run papertrade positions
+uv run papertrade close-all --live
+uv run papertrade close 123 --live --force    # account stream down: sign with the stored session key
+uv run papertrade kill-switch on --reason "maintenance"
+```
+
+```python
+from papertrade_client import PapertradeClient
+
+client = PapertradeClient.from_env().start()  # starts the account stream
+result = client.trader.open("BTC", "long", "10", 50)
+for submission in result.submissions:
+    print(submission.intent_id, client.trader.wait_intent(submission.intent_id, timeout_s=30))
+
+# In a long-running loop, now and then:
+client.trader.session.maybe_renew()  # live only; registers a new session key before day 30
+```
+
+## Safety model
+
+- **Dry run by default.** A write is live only when `PAPERTRADE_LIVE_TRADING=true` and the call does not
+  ask for a dry run. Dry runs sign with a throwaway key and a random nonce and return the unsigned message.
+- **Two keys.** The wallet key signs session-key registrations and withdrawals. Trades are signed by the
+  session key in the data directory, which Papertrade lets open and close positions but not withdraw.
+- **Guards before signing**: Papertrade's limits (minimums, leverage range, market state, pauses, side and
+  account open-interest caps), the limits above, account-stream freshness and session validity.
+- **No blind retries.** Every open is recorded as in flight before it is sent and counts against the
+  position and margin limits until the account stream shows it (or its one-hour deadline passes). If the
+  relayer's answer never arrives the intent is tracked by its id, never resubmitted, so neither a retry
+  nor a quick second open can double a position.
+- **Shared state.** Processes that share the data directory (a strategy, the CLI, the drift monitor) see
+  each other's kill switch and nonces: every update re-reads `state.json` under an exclusive file lock.
+- **Kill switch** blocks opens and survives restarts. Closes never depend on it, on market data or on a
+  lock held by an open; `close --force` works even when the account stream is down.
+- **Audit log**: every live intent is written before it leaves, then again with the relayer's answer.
+
+## Going live
+
+1. `papertrade markets`, `papertrade status`, a dry-run `open`.
+2. `papertrade deposit-address`; only if `matches_relayer` is true, send USDC on Hyperliquid to that
+   address (at least 10 USDC must arrive; the first deposit pays a 1 USDC activation fee). Wait until
+   `status` shows the balance.
+3. `PAPERTRADE_LIVE_TRADING=true papertrade session register`, then check that `session` shows an active key.
+4. One minimal live trade: `open BTC long 10 50 --live`, then `close-all --live`. Check `audit.jsonl`.
+
+## Protocol drift monitor
+
+```bash
+uv run papertrade drift                       # exit 0 ok/info, 1 warn, 2 breaking, 3 could not observe
+uv run papertrade drift --kill-on-breaking    # also engage the kill switch in PAPERTRADE_DATA_DIR
+```
+
+It compares the live protocol with [`pinned.json`](src/papertrade_client/pinned.json):
+
+| Source | Breaking | Warning |
+| --- | --- | --- |
+| Frontend bundle | EIP-712 types or domains, intent-id tag, core addresses | new intent types, payout-curve parameters |
+| HyperEVM | any proxy implementation upgraded | |
+| Relayer batches | a recent call that does not verify with our encoding | no opens/closes seen |
+| `/state/trading`, account stream | | frame keys, protocol parameters |
+| Docs "Protocol changes" | a new contract set | page updated |
+
+A GitHub Actions workflow runs it daily and opens (or updates) an issue labelled `protocol-drift`.
+After adapting the client to a change, re-pin with `papertrade drift --pin` and commit `pinned.json`.
+
+## Development
+
+```bash
+uv run pytest -m "not network"   # offline
+uv run pytest -m network         # read-only checks against the live endpoints
+uv run python scripts/capture_vectors.py --out tests/fixtures/onchain_vectors.json
+```
+
+## License
+
+MIT

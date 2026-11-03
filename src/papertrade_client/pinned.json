@@ -1,0 +1,136 @@
+{
+  "account_stream": {
+    "keys": [
+      "accountRevision",
+      "address",
+      "balance",
+      "consumableDebt",
+      "funds",
+      "indexedThroughBlock",
+      "indexedThroughTimestamp",
+      "lifetime",
+      "locked",
+      "oiCaps",
+      "openPositions",
+      "operations",
+      "paper",
+      "queueNodeCount",
+      "queueRevision",
+      "queued",
+      "sessionKeys",
+      "walletRevision"
+    ]
+  },
+  "bundle": {
+    "build_id": "38397c220121",
+    "deployment": {
+      "addresses": {
+        "depositProxyFactory": "0x1629b7d46bef6e13ff754174fc9f32dea309b38f",
+        "exchange": "0x6cd5661646289fb6e65ea5c032310fded797d0a2",
+        "exchangeImplementation": "0x0f3febfc94876b0c895f7acecdc8f5c863b549ee",
+        "exchangeNextImplementation": "0x0a44049dbbb6b4762a6ba37aa0f7548c0b4a3723",
+        "multisig": "0x696292762fd5ac3677a45edbe54eaece4194d1f6",
+        "paper": "0xe40f17915daa230324030003a197cdaef2261c0e",
+        "paperStaking": "0xaad6c7b0cc3014fc80ffedae0ed7ce5967b0f016",
+        "timelock": "0xb915fa41e824d6aa31bb833ee81220c0f2c8ea0f"
+      },
+      "chainId": 999,
+      "curves": {
+        "profitCarveOut": {
+          "cubicFall": false,
+          "endPpm": 600,
+          "holdbackWad": "3597000000000000000",
+          "startPpm": 75
+        },
+        "profitOffHours": {
+          "cubicFall": true,
+          "endPpm": 1000,
+          "holdbackWad": "6085000000000000000",
+          "startPpm": 30
+        }
+      },
+      "profitThresholdDivisor": 50000
+    },
+    "domains": {
+      "cancellation": [
+        "PaperTrade Intent Cancel",
+        "2"
+      ],
+      "exchange": [
+        "String",
+        "1"
+      ],
+      "paperStaking": [
+        "PaperStaking",
+        "1"
+      ]
+    }
+  },
+  "docs": {
+    "last_updated": "2026-10-21",
+    "latest_contract_set": 2
+  },
+  "implementations": {
+    "batchExecutor": "0xe0bc9cc7b067060aafccbaa3e250700c9cdd7262",
+    "depositProxyFactory": "0x8f22a73a23a2de0dbfdf6729f4d8c07dbdc69cf0",
+    "exchange": "0x0a44049dbbb6b4762a6ba37aa0f7548c0b4a3723",
+    "paperStaking": "0xe6e3519455170913c5c3bfe541dd918a2d0cbb15",
+    "paperToken": "0x433bd418ec92818a960585f4d5fae563e735bb4a",
+    "sessionKeyManager": "0x0a2db5c7614b714fd9ec12b29bff3b4f4c545d82"
+  },
+  "trading_state": {
+    "exchange": "next",
+    "keys": [
+      "accRewardPerShareRaw",
+      "accountOiCapRaw",
+      "exchange",
+      "indexedThroughBlock",
+      "instruments",
+      "intakeControls",
+      "maximumLeverage",
+      "minimumLeverage",
+      "minimumOpenNotionalRaw",
+      "minimumTradeSizeRaw",
+      "offHours",
+      "schemaVersion",
+      "tradingPaused",
+      "winFeeRateRaw"
+    ],
+    "params": {
+      "accountOiCapRaw": "10000000000000000000000000",
+      "instruments": {
+        "BTC": {
+          "assetIndex": 0,
+          "baseRateRaw": "100000000000000000",
+          "bustBufferRaw": "476041580087574",
+          "id": 0,
+          "maxLeverage": 1000,
+          "maxPositionNotionalRaw": "10000000000000000000000000",
+          "openable": true,
+          "positionMultiplierRaw": "814598000000000000000",
+          "priceScale": 10,
+          "rateMultiplierRaw": "15000000000000000000000",
+          "referenceNotionalRaw": "100000000000000000000000"
+        },
+        "ETH": {
+          "assetIndex": 1,
+          "baseRateRaw": "100000000000000000",
+          "bustBufferRaw": "481304050180130",
+          "id": 1,
+          "maxLeverage": 1000,
+          "maxPositionNotionalRaw": "10000000000000000000000000",
+          "openable": true,
+          "positionMultiplierRaw": "483979000000000000000",
+          "priceScale": 100,
+          "rateMultiplierRaw": "15000000000000000000000",
+          "referenceNotionalRaw": "100000000000000000000000"
+        }
+      },
+      "maximumLeverage": 1000,
+      "minimumLeverage": 0,
+      "minimumOpenNotionalRaw": "500000000000000000000",
+      "minimumTradeSizeRaw": "10000000000000000000",
+      "winFeeRateRaw": "20000000000000000"
+    }
+  }
+}

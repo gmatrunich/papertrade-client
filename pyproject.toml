@@ -1,0 +1,37 @@
+[project]
+name = "papertrade-client"
+version = "0.1.0"
+description = "Unofficial Python client for papertrade.xyz: signed intents, guards, account stream and a daily protocol drift monitor"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Gleb Matrunich", email = "gleb@matrunich.com" }]
+requires-python = ">=3.12"
+dependencies = [
+    "eth-account>=0.14.0",
+    "httpx>=0.28.1",
+]
+
+[project.scripts]
+papertrade = "papertrade_client.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "ruff>=0.17.3",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["network: needs the live Papertrade endpoints (deselect with -m 'not network')"]
+
+[tool.ruff]
+line-length = 140
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
