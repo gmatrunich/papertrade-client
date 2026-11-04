@@ -74,7 +74,8 @@ class ExitEngine:
     def run_forever(self, stop: threading.Event | None = None) -> None:
         stop = stop or threading.Event()
         self.trader.stream.start()
-        self._notify(f"exit engine started ({'live' if self.live else 'dry-run'})")
+        # Logged, not sent: systemd restarts the engine within 5 s, and a crash loop must not flood the chat.
+        log.info("exit engine started (%s)", "live" if self.live else "dry-run")
         last_beat = last_renew = 0.0
         while not stop.is_set():
             try:
@@ -83,7 +84,10 @@ class ExitEngine:
                 log.exception("exit tick failed")
             now = self.trader.clock()
             if now - last_beat >= HEARTBEAT_EVERY_S:
-                self._heartbeat()
+                try:
+                    self._heartbeat()
+                except Exception:
+                    log.exception("heartbeat failed")
                 last_beat = now
             if now - last_renew >= RENEW_EVERY_S:
                 try:
