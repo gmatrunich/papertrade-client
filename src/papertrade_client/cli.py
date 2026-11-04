@@ -158,6 +158,8 @@ def cmd_deposit_address(args: argparse.Namespace) -> int:
     info = _client(args, stream=False).deposit_address()
     info["notes"] = [
         "Send USDC on Hyperliquid (HyperCore) to deposit_address, only if matches_relayer is true.",
+        "Not on Arbitrum, Ethereum or HyperEVM, and not to the wallet address: Papertrade never credits those transfers.",
+        "Funds on another chain: use Deposit in papertrade.xyz, connected as this wallet; it bridges to deposit_address.",
         "At least 10 USDC must arrive; the first deposit pays a one-time 1 USDC activation fee.",
         "Send one deposit at a time and wait for it to be credited.",
     ]

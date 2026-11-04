@@ -130,7 +130,9 @@ client.trader.session.maybe_renew()  # live only; registers a new session key be
 1. `papertrade markets`, `papertrade status`, a dry-run `open`.
 2. `papertrade deposit-address`; only if `matches_relayer` is true, send USDC on Hyperliquid to that
    address (at least 10 USDC must arrive; the first deposit pays a 1 USDC activation fee). Wait until
-   `status` shows the balance.
+   `status` shows the balance. Only HyperCore transfers to `deposit_address` are credited: USDC sent on
+   Arbitrum, Ethereum or HyperEVM, or to the wallet address itself, is not. To deposit from another chain,
+   connect the wallet to papertrade.xyz and use Deposit, which bridges to the same address.
 3. `PAPERTRADE_LIVE_TRADING=true papertrade session register`, then check that `session` shows an active key.
 4. One minimal live trade: `open BTC long 10 50 --live`, then `close-all --live`. Check `audit.jsonl`.
 
