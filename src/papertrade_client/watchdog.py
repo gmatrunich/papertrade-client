@@ -25,6 +25,7 @@ STATE_FILE = "watchdog.json"
 
 INFLIGHT_ALERT_S = 300  # an open the relayer accepted but the account stream still does not show
 BUST_ALERT_FRACTION = 0.3  # alert when less than this share of the entry-to-bust distance is left
+CONFIRM_AFTER_S = 300  # Papertrade's API drops out for 2-4 minutes several times a day; alert when it lasts longer
 DRIFT_MAX_AGE_S = 3 * 3600  # the drift timer runs hourly; allow two failed observations
 HEARTBEAT_HOUR_UTC = 7
 
@@ -46,6 +47,7 @@ class Observation:
     inflight: list[dict[str, Any]] = field(default_factory=list)
     positions: list[dict[str, Any]] = field(default_factory=list)
     drift: dict[str, Any] | None = None  # the drift monitor's --json report plus its file mtime
+    drift_observed_at: float | None = None  # mtime of the last report that was not an error (kept by run())
 
 
 def observe(env: dict[str, str] | None = None) -> Observation:
@@ -93,7 +95,7 @@ def observe(env: dict[str, str] | None = None) -> Observation:
 
 
 def _needs_confirmation(key: str) -> bool:
-    # Upstream hiccups clear by themselves; alert only when they persist for a second run.
+    # Upstream hiccups clear by themselves; alert only when they persist for CONFIRM_AFTER_S.
     return key.startswith("unobservable:") or key == "stream_stale"
 
 
@@ -145,9 +147,14 @@ def _drift_problems(obs: Observation) -> dict[str, str]:
     if age > DRIFT_MAX_AGE_S:
         out["drift_stale"] = f"drift report is {age / 3600:.0f} h old: is papertrade-drift.timer running?"
     level = report.get("level")
-    if level in ("warn", "breaking", "error"):
-        findings = [f["message"] for f in report.get("findings", []) if f.get("level") == level]
-        out[f"drift_{level}"] = f"protocol drift {level}: " + "; ".join(findings)[:500]
+    findings = "; ".join(f["message"] for f in report.get("findings", []) if f.get("level") == level)[:500]
+    if level == "error":
+        # One failed hourly observation is routine; alert when none has succeeded for DRIFT_MAX_AGE_S.
+        blind_s = obs.now - (obs.drift_observed_at if obs.drift_observed_at is not None else obs.now)
+        if blind_s > DRIFT_MAX_AGE_S:
+            out["drift_unobservable"] = f"drift monitor has not observed the protocol for {blind_s / 3600:.0f} h: {findings}"
+    elif level in ("warn", "breaking"):
+        out[f"drift_{level}"] = f"protocol drift {level}: {findings}"
     return out
 
 
@@ -215,8 +222,13 @@ def run(data_dir: Path, notifier: Notifier, obs: Observation, test_message: bool
         state = json.loads(path.read_text())
     except (OSError, ValueError):
         state = {}
+    if obs.drift and obs.drift.get("level") != "error":
+        obs.drift_observed_at = obs.drift["mtime"]
+    else:
+        obs.drift_observed_at = state.get("drift_observed_at", obs.now)
     seen = problems(obs)
-    confirmed = {k: v for k, v in seen.items() if not _needs_confirmation(k) or k in state.get("seen", {})}
+    since = {k: state.get("since", {}).get(k, obs.now) for k in seen}
+    confirmed = {k: v for k, v in seen.items() if not _needs_confirmation(k) or obs.now - since[k] >= CONFIRM_AFTER_S}
     outgoing = messages(state.get("alerted", {}), confirmed)
     today = datetime.fromtimestamp(obs.now, UTC)
     heartbeat_due = state.get("heartbeat_day") != today.date().isoformat() and today.hour >= HEARTBEAT_HOUR_UTC
@@ -225,8 +237,9 @@ def run(data_dir: Path, notifier: Notifier, obs: Observation, test_message: bool
     for text in outgoing:
         notifier.send(text)
     state = {
-        "seen": seen,
+        "since": since,
         "alerted": confirmed,
+        "drift_observed_at": obs.drift_observed_at,
         "heartbeat_day": today.date().isoformat() if heartbeat_due else state.get("heartbeat_day"),
         "checked_at": obs.now,
     }

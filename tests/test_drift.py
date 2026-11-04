@@ -69,6 +69,16 @@ def test_upgrade_and_unverified_calls_are_breaking():
     assert drift.compare(pinned, observed, []).level == "breaking"
 
 
+def test_off_hours_key_comes_and_goes():
+    pinned = drift.load_pinned()
+    observed = observed_from_pinned(pinned)
+    observed["trading_state"]["keys"] = [k for k in observed["trading_state"]["keys"] if k != "offHours"]
+    observed["trading_state"]["off_hours"] = False
+    assert drift.compare(pinned, observed, []).level == "info"
+    observed["trading_state"]["keys"].append("brandNewKey")
+    assert drift.compare(pinned, observed, []).level == "warn"
+
+
 def test_parameter_change_is_a_warning():
     pinned = drift.load_pinned()
     observed = observed_from_pinned(pinned)

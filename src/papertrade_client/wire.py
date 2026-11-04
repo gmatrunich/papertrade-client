@@ -133,6 +133,9 @@ class Intake:
     paused_actions: tuple[str, ...] = ()
 
 
+# Present only while the off-hours payout curve is in force (absent rather than false, seen 2026-11-03/04).
+OPTIONAL_TRADING_STATE_KEYS = frozenset({"offHours"})
+
 # Keys /state/trading carried on 2026-11-03; anything else is reported by the drift monitor.
 TRADING_STATE_KEYS = frozenset(
     {

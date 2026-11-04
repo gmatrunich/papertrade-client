@@ -333,9 +333,10 @@ def compare(pinned: dict[str, Any], observed: dict[str, Any], errors: list[Findi
             )
     t = observed.get("trading_state")
     if t:
+        required = lambda keys: [k for k in keys if k not in wire.OPTIONAL_TRADING_STATE_KEYS]  # noqa: E731
         for diff in _diff(
-            {"keys": pinned["trading_state"]["keys"], "exchange": pinned["trading_state"]["exchange"]},
-            {"keys": t["keys"], "exchange": t["exchange"]},
+            {"keys": required(pinned["trading_state"]["keys"]), "exchange": pinned["trading_state"]["exchange"]},
+            {"keys": required(t["keys"]), "exchange": t["exchange"]},
         ):
             report.add("trading_state.shape", "warn", f"`/state/trading` {diff['path']} changed", diff)
         for diff in _diff(pinned["trading_state"]["params"], t["params"]):

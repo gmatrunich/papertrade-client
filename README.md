@@ -130,7 +130,9 @@ client.trader.session.maybe_renew()  # live only; registers a new session key be
 1. `papertrade markets`, `papertrade status`, a dry-run `open`.
 2. `papertrade deposit-address`; only if `matches_relayer` is true, send USDC on Hyperliquid to that
    address (at least 10 USDC must arrive; the first deposit pays a 1 USDC activation fee). Wait until
-   `status` shows the balance.
+   `status` shows the balance. Only HyperCore transfers to `deposit_address` are credited: USDC sent on
+   Arbitrum, Ethereum or HyperEVM, or to the wallet address itself, is not. To deposit from another chain,
+   connect the wallet to papertrade.xyz and use Deposit, which bridges to the same address.
 3. `PAPERTRADE_LIVE_TRADING=true papertrade session register`, then check that `session` shows an active key.
 4. One minimal live trade: `open BTC long 10 50 --live`, then `close-all --live`. Check `audit.jsonl`.
 
@@ -166,8 +168,9 @@ and share the default data directory:
 
 The watchdog reports: account stream unavailable or silent, kill switch engaged, Papertrade paused, session
 key missing or expiring, an open accepted by the relayer but not on the stream after 5 minutes, a position
-with less than 30% of the entry-to-bust distance left, and drift warnings or a drift report older than 3 hours.
-Upstream errors alert only when they persist for two runs. A daily summary at 07:00 UTC doubles as a
+with less than 30% of the entry-to-bust distance left, drift warnings, and a drift monitor that has not run or
+not observed the protocol for 3 hours. Papertrade's API drops out for a few minutes several times a day, so
+upstream errors alert only when they last 5 minutes. A daily summary at 07:00 UTC doubles as a
 heartbeat; `papertrade watchdog --test` sends it now.
 
 ```bash

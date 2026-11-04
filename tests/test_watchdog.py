@@ -107,25 +107,42 @@ def test_sends_only_changes_and_persists(tmp_path):
     assert notifier.sent == ["✅ cleared: kill switch engaged: manual"]
 
 
-def test_upstream_errors_need_two_runs(tmp_path):
+def test_upstream_errors_alert_after_five_minutes(tmp_path):
     notifier = Recorder()
-    first = watchdog.run(tmp_path, notifier, healthy(errors={"stream": "timeout"}))
-    assert first["problems"] == {} and first["unconfirmed"] == ["unobservable:stream"]
+    for minute in (0, 2, 4):
+        result = watchdog.run(tmp_path, notifier, healthy(now=NOW + minute * 60, errors={"stream": "timeout"}))
+        assert result["problems"] == {} and result["unconfirmed"] == ["unobservable:stream"]
     assert not any(m.startswith("🔴") for m in notifier.sent)
 
-    watchdog.run(tmp_path, notifier, healthy(errors={"stream": "timeout"}))
+    watchdog.run(tmp_path, notifier, healthy(now=NOW + 360, errors={"stream": "timeout"}))
     assert "🔴 stream unavailable: timeout" in notifier.sent
 
     notifier.sent.clear()
-    watchdog.run(tmp_path, notifier, healthy())
+    watchdog.run(tmp_path, notifier, healthy(now=NOW + 480))
     assert notifier.sent == ["✅ cleared: stream unavailable: timeout"]
 
 
 def test_blip_that_clears_is_never_sent(tmp_path):
     notifier = Recorder()
-    watchdog.run(tmp_path, notifier, healthy(errors={"papertrade_api": "502"}))
-    watchdog.run(tmp_path, notifier, healthy())
+    for minute in (0, 2, 4):
+        watchdog.run(tmp_path, notifier, healthy(now=NOW + minute * 60, errors={"papertrade_api": "502"}))
+    watchdog.run(tmp_path, notifier, healthy(now=NOW + 360))
     assert not any("papertrade_api" in m for m in notifier.sent)
+
+
+def test_drift_error_alerts_only_after_three_blind_hours(tmp_path):
+    def drift(level, at):
+        return {"level": level, "findings": [{"level": level, "message": "could not observe: ReadTimeout"}], "mtime": at}
+
+    notifier = Recorder()
+    watchdog.run(tmp_path, notifier, healthy(drift=drift("ok", NOW)))
+    for hour in (1, 2):
+        at = NOW + hour * 3600
+        result = watchdog.run(tmp_path, notifier, healthy(now=at + 60, drift=drift("error", at)))
+        assert result["problems"] == {}
+    at = NOW + 3 * 3600
+    watchdog.run(tmp_path, notifier, healthy(now=at + 60, drift=drift("error", at)))
+    assert any(m.startswith("🔴 drift monitor has not observed the protocol for 3 h") for m in notifier.sent)
 
 
 def test_daily_heartbeat_once(tmp_path):
