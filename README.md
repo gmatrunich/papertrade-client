@@ -166,8 +166,9 @@ and share the default data directory:
 
 The watchdog reports: account stream unavailable or silent, kill switch engaged, Papertrade paused, session
 key missing or expiring, an open accepted by the relayer but not on the stream after 5 minutes, a position
-with less than 30% of the entry-to-bust distance left, and drift warnings or a drift report older than 3 hours.
-Upstream errors alert only when they persist for two runs. A daily summary at 07:00 UTC doubles as a
+with less than 30% of the entry-to-bust distance left, drift warnings, and a drift monitor that has not run or
+not observed the protocol for 3 hours. Papertrade's API drops out for a few minutes several times a day, so
+upstream errors alert only when they last 5 minutes. A daily summary at 07:00 UTC doubles as a
 heartbeat; `papertrade watchdog --test` sends it now.
 
 ```bash
