@@ -19,6 +19,9 @@ from eth_account import Account
 from . import drift
 from .trader import GuardError, WriteResult
 
+# A close waited 46 s for its batch on 2026-11-04; give live writes a minute and a half to settle.
+OUTCOME_WAIT_S = 90
+
 
 def _print(value: Any) -> None:
     def default(o: Any) -> Any:
@@ -46,8 +49,14 @@ def _client(args: argparse.Namespace, stream: bool = True, require_snapshot: boo
         return client
 
 
-def _write(result: WriteResult) -> int:
-    _print(dataclasses.asdict(result))
+def _write(result: WriteResult, client=None) -> int:
+    output = dataclasses.asdict(result)
+    if client is not None and result.mode == "live" and client.stream.state() is not None:
+        # Wait while the stream is up, so the outcome is recorded for the processes that come after.
+        output["outcomes"] = {
+            s.intent_id: client.trader.wait_intent(s.intent_id, OUTCOME_WAIT_S) for s in result.submissions if s.acknowledged
+        }
+    _print(output)
     if result.mode == "dry-run" and result.violations:
         print("dry-run: a live request would be refused by the guards above", file=sys.stderr)
         return 1
@@ -180,20 +189,23 @@ def cmd_session(args: argparse.Namespace) -> int:
 
 
 def cmd_open(args: argparse.Namespace) -> int:
-    return _write(_client(args).trader.open(args.market, args.side, args.margin, args.leverage, dry_run=not args.live))
+    client = _client(args)
+    return _write(client.trader.open(args.market, args.side, args.margin, args.leverage, dry_run=not args.live), client)
 
 
 def cmd_close(args: argparse.Namespace) -> int:
     client = _client(args, require_snapshot=not args.force)
-    return _write(client.trader.close(args.position_ids, dry_run=not args.live, force=args.force))
+    return _write(client.trader.close(args.position_ids, dry_run=not args.live, force=args.force), client)
 
 
 def cmd_close_all(args: argparse.Namespace) -> int:
-    return _write(_client(args).trader.close_all(dry_run=not args.live))
+    client = _client(args)
+    return _write(client.trader.close_all(dry_run=not args.live), client)
 
 
 def cmd_cancel(args: argparse.Namespace) -> int:
-    return _write(_client(args).trader.cancel(args.intent_id, dry_run=not args.live))
+    client = _client(args)
+    return _write(client.trader.cancel(args.intent_id, dry_run=not args.live), client)
 
 
 def cmd_withdraw(args: argparse.Namespace) -> int:
