@@ -63,6 +63,9 @@ def test_healthy_has_no_problems():
         ({"drift": {"level": "breaking", "findings": [{"level": "breaking", "message": "typed data"}], "mtime": NOW}}, "drift_breaking"),
         ({"inflight": [{"intent_id": "0x" + "ab" * 32, "action": "openPosition", "submitted_at": NOW - 600}]}, "inflight:0x" + "ab" * 32),
         ({"positions": [position(mark=98.4)]}, "bust:7"),
+        ({"positions": [position(mark=100.0)]}, "exits_missing"),
+        ({"exits": {"at": NOW - 600, "mode": "live"}}, "exits_silent"),
+        ({"exits": {"at": NOW, "mode": "dry-run"}}, "exits_dry_run"),
     ],
 )
 def test_each_problem(overrides, key):

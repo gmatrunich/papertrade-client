@@ -42,6 +42,8 @@ class Config:
     snapshot_max_age_s: float = 30
     # SessionManager.maybe_renew() registers a new key once the active one has less than this left.
     session_renew_before_s: float = 72 * 3600
+    # The exit engine closes any position once the mark has covered this share of the entry-to-bust distance.
+    exit_stop_fraction: float = 0.5
     exchange_origin: str = deployment.EXCHANGE_ORIGIN
     hyperevm_rpc_url: str = deployment.HYPEREVM_RPC_URL
     hyperliquid_info_url: str = deployment.HYPERLIQUID_INFO_URL
@@ -74,6 +76,7 @@ def load(env: dict[str, str] | None = None) -> Config:
         ),
         snapshot_max_age_s=float(get("SNAPSHOT_MAX_AGE_S", 30)),
         session_renew_before_s=float(get("SESSION_RENEW_BEFORE_H", 72)) * 3600,
+        exit_stop_fraction=float(get("EXIT_STOP_FRACTION", Config.exit_stop_fraction)),
         exchange_origin=get("EXCHANGE_ORIGIN", deployment.EXCHANGE_ORIGIN),
         hyperevm_rpc_url=get("HYPEREVM_RPC_URL", deployment.HYPEREVM_RPC_URL),
         hyperliquid_info_url=get("HYPERLIQUID_INFO_URL", deployment.HYPERLIQUID_INFO_URL),

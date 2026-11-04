@@ -78,6 +78,7 @@ uv run papertrade keygen --out .env   # a fresh wallet used only for Papertrade;
 | `PAPERTRADE_DAILY_LOSS_LIMIT_USD` | `10` | realised loss that blocks new opens, counted from the first account update seen each UTC day |
 | `PAPERTRADE_SNAPSHOT_MAX_AGE_S` | `30` | refuse opens when the account stream has been silent this long |
 | `PAPERTRADE_SESSION_RENEW_BEFORE_H` | `72` | `trader.session.maybe_renew()` registers a new key when the active one has less left |
+| `PAPERTRADE_EXIT_STOP_FRACTION` | `0.5` | the exit engine closes any position once the mark has covered this share of the entry-to-bust distance |
 | `PAPERTRADE_TELEGRAM_BOT_TOKEN`, `PAPERTRADE_TELEGRAM_CHAT_ID` | unset | where `papertrade watchdog` sends alerts; stdout without them |
 
 Export the file before running commands, e.g. `set -a; . ./.env; set +a`.
@@ -89,6 +90,7 @@ uv run papertrade status                      # account, session, limits, mode
 uv run papertrade quote BTC long 10 50        # bust price and payout curve
 uv run papertrade open BTC long 10 50         # dry run: guards + an unsigned preview
 uv run papertrade open BTC long 10 50 --live  # live only with PAPERTRADE_LIVE_TRADING=true
+uv run papertrade open BTC long 10 50 --live --stop 0.5 --take 1 --max-hold 2h   # with an exit plan
 uv run papertrade positions
 uv run papertrade close-all --live
 uv run papertrade close 123 --live --force    # account stream down: sign with the stored session key
@@ -99,13 +101,36 @@ uv run papertrade kill-switch on --reason "maintenance"
 from papertrade_client import PapertradeClient
 
 client = PapertradeClient.from_env().start()  # starts the account stream
-result = client.trader.open("BTC", "long", "10", 50)
+from papertrade_client.exits import ExitPlan
+
+result = client.trader.open("BTC", "long", "10", 50, exit_plan=ExitPlan(stop_pct=0.5, take_pct=1, max_hold_s=7200))
 for submission in result.submissions:
-    print(submission.intent_id, client.trader.wait_intent(submission.intent_id, timeout_s=30))
+    print(submission.intent_id, client.trader.wait_intent(submission.intent_id, timeout_s=90))
 
 # In a long-running loop, now and then:
 client.trader.session.maybe_renew()  # live only; registers a new session key before day 30
 ```
+
+## Exits
+
+Papertrade has no stop-loss or take-profit orders. `papertrade exits` is a long-running exit engine: once a
+second it compares Hyperliquid's mid with every open position and closes the position when a rule fires:
+
+- the **exit plan** attached at open (`exit_plan=` / `--stop`, `--take`, `--max-hold`), stored in `state.json`
+  under the intent id, so a strategy process and the engine need not share anything else;
+- the **safety stop** for every position, with or without a plan: `PAPERTRADE_EXIT_STOP_FRACTION` of the way
+  from entry to bust (at 50× about 1% against you, leaving another 1% for the close to execute).
+
+A close executes in the relayer's next batch, 7 to 46 s after submission on the first live trade, and a close
+at or past bust settles as a liquidation, so stops belong well before bust. A close that has not resolved
+after 150 s is sent again. In dry-run the engine reports what it would close and sends nothing. It writes a
+heartbeat to `exits.json`, which the watchdog checks.
+
+`papertrade probe` is an execution probe, not a strategy: one minimum-size trade ($10 × 50) with a random
+side and a 5-minute holding limit, refused unless the exit engine is running live. Run on a timer it measures
+latency and fills for a few cents a trade. `papertrade reconcile` matches the audit log with the trade history:
+open and close latency, entry slippage against the mid at signing, exit slippage against the mark at the exit
+decision, booked payout against `payout.settle`, and anything that does not line up.
 
 ## Safety model
 
@@ -158,18 +183,22 @@ After adapting the client to a change, re-pin with `papertrade drift --pin` and 
 
 ## Running on a server
 
-`deploy/install.sh` installs two systemd user timers on Linux. Both read `~/.config/papertrade/env` (mode 0600)
+`deploy/install.sh` installs systemd user units on Linux. All read `~/.config/papertrade/env` (mode 0600)
 and share the default data directory:
 
-| Timer | Runs | Does |
+| Unit | Runs | Does |
 | --- | --- | --- |
+| `papertrade-exits` | always (service) | `papertrade exits`; restarted by `install.sh` so it picks up code and env changes |
 | `papertrade-drift` | hourly | `papertrade drift --kill-on-breaking`, report saved as `drift.json` in the data directory |
 | `papertrade-watchdog` | every 2 minutes | `papertrade watchdog`: alerts to Telegram when a problem appears or clears |
+| `papertrade-reconcile` | daily, 07:10 UTC | `papertrade reconcile --since 24h`, digest to Telegram |
+| `papertrade-probe` | about every 4 hours | `papertrade probe --live`; installed but **not enabled** by `install.sh` |
 
 The watchdog reports: account stream unavailable or silent, kill switch engaged, Papertrade paused, session
 key missing or expiring, an open accepted by the relayer but not on the stream after 5 minutes, a position
-with less than 30% of the entry-to-bust distance left, drift warnings, and a drift monitor that has not run or
-not observed the protocol for 3 hours. Papertrade's API drops out for a few minutes several times a day, so
+with less than 30% of the entry-to-bust distance left, drift warnings, a drift monitor that has not run or
+not observed the protocol for 3 hours, and an exit engine that is silent, missing while positions are open,
+or still dry-run while trading is live. Papertrade's API drops out for a few minutes several times a day, so
 upstream errors alert only when they last 5 minutes. A daily summary at 07:00 UTC doubles as a
 heartbeat; `papertrade watchdog --test` sends it now.
 

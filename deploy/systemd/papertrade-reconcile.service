@@ -1,0 +1,14 @@
+[Unit]
+Description=Papertrade reconciliation digest (audit log against trade history)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=@REPO@
+Environment=PAPERTRADE_DATA_DIR=%h/.local/share/papertrade-client
+EnvironmentFile=%h/.config/papertrade/env
+ExecStart=@REPO@/.venv/bin/papertrade reconcile --since 24h --digest --notify
+# 1 = discrepancies found: they are in the digest, not a unit failure.
+SuccessExitStatus=1
+TimeoutStartSec=5min

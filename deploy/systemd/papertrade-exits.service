@@ -1,0 +1,16 @@
+[Unit]
+Description=Papertrade exit engine (stops, take-profits, holding limits)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@REPO@
+Environment=PAPERTRADE_DATA_DIR=%h/.local/share/papertrade-client
+EnvironmentFile=%h/.config/papertrade/env
+ExecStart=@REPO@/.venv/bin/papertrade exits
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

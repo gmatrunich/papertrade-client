@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily Papertrade reconciliation digest
+
+[Timer]
+OnCalendar=*-*-* 07:10:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

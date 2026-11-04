@@ -1,0 +1,15 @@
+[Unit]
+Description=Papertrade execution probe (one minimum-size trade, random side, 5-minute exit)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=@REPO@
+Environment=PAPERTRADE_DATA_DIR=%h/.local/share/papertrade-client
+EnvironmentFile=%h/.config/papertrade/env
+# Live only when PAPERTRADE_LIVE_TRADING=true and the exit engine reports live.
+ExecStart=@REPO@/.venv/bin/papertrade probe --live
+# 1 = refused by a guard (a position is open, kill switch, loss limit): a skipped run, not a failure.
+SuccessExitStatus=1
+TimeoutStartSec=5min
