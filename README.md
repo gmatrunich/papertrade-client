@@ -192,7 +192,7 @@ and share the default data directory:
 | `papertrade-drift` | hourly | `papertrade drift --kill-on-breaking`, report saved as `drift.json` in the data directory |
 | `papertrade-watchdog` | every 2 minutes | `papertrade watchdog`: alerts to Telegram when a problem appears or clears |
 | `papertrade-reconcile` | daily, 07:10 UTC | `papertrade reconcile --since 24h`, digest to Telegram |
-| `papertrade-probe` | about every 4 hours | `papertrade probe --live`; installed but **not enabled** by `install.sh` |
+| `papertrade-probe` | about once an hour (at least 10 min apart) | `papertrade probe --live`; installed but **not enabled** by `install.sh` |
 
 The watchdog reports: account stream unavailable or silent, kill switch engaged, Papertrade paused, session
 key missing or expiring, an open accepted by the relayer but not on the stream after 5 minutes, a position

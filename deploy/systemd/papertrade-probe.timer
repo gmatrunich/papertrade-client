@@ -1,9 +1,11 @@
 [Unit]
-Description=Papertrade execution probe about every 4 hours (not enabled by install.sh)
+Description=Papertrade execution probe about once an hour (not enabled by install.sh)
 
 [Timer]
-OnCalendar=00/4:00
-RandomizedDelaySec=2h
+# One run in each hour at a random minute (0-50 min after :00), so runs stay at least 10 min apart:
+# more than the 5-minute hold plus the close, and MAX_OPEN_POSITIONS=1 refuses any overlap anyway.
+OnCalendar=hourly
+RandomizedDelaySec=50min
 
 [Install]
 WantedBy=timers.target
