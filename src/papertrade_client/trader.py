@@ -77,6 +77,7 @@ class Trader:
             wallet, api, store, audit, stream.state, self.lock, clock, config.live_trading, config.session_renew_before_s
         )
         stream.add_listener(self._record_daily_baseline)
+        stream.add_listener(self._record_outcomes)
 
     # -- helpers ------------------------------------------------------------------
 
@@ -108,7 +109,9 @@ class Trader:
         return account.lifetime.realized_pnl_raw - int(self.store.read()["daily"]["realized_pnl_baseline_raw"])
 
     def intent_status(self, intent_id: str) -> str:
-        """succeeded | failed | expired | cancelled | pending | unknown."""
+        """succeeded | failed | expired | cancelled | positions_closed | pending | unknown.
+
+        ``positions_closed``: a close whose positions are gone, though no outcome was seen for it."""
         intent_id = intent_id.lower()
         outcome = self.stream.outcomes.intents.get(intent_id)
         if outcome:
@@ -118,7 +121,32 @@ class Trader:
             return "succeeded"
         if account and any(op.intent_id == intent_id for op in account.operations):
             return "pending"
+        # Outcomes reach only the process streaming at the time, so they are also kept in the store.
+        item = next((i for i in self.store.read()["inflight"] if i["intent_id"] == intent_id), None)
+        if item and item.get("outcome"):
+            return item["outcome"]
+        if account and item and item.get("position_ids"):
+            if not set(item["position_ids"]) & {p.position_id for p in account.open_positions}:
+                return "positions_closed"
         return "unknown"
+
+    def _record_outcomes(self, account: AccountState) -> None:
+        """Stream listener: persist how in-flight intents ended, for processes that start later."""
+        resolved = {}
+        for item in self.store.read()["inflight"]:
+            if not item.get("outcome"):
+                status = self.intent_status(item["intent_id"])
+                if status not in ("pending", "unknown"):
+                    resolved[item["intent_id"]] = status
+        if not resolved:
+            return
+
+        def apply(state: dict[str, Any]) -> None:
+            for item in state["inflight"]:
+                if item["intent_id"] in resolved:
+                    item["outcome"] = resolved[item["intent_id"]]
+
+        self.store.update(apply)
 
     def wait_intent(self, intent_id: str, timeout_s: float = 30) -> str:
         deadline = time.monotonic() + timeout_s
@@ -160,6 +188,8 @@ class Trader:
             "acknowledged": None,
             "margin_raw": signed.wire.get("size") if action == "openPosition" else None,
         }
+        if action == "closePositions":
+            entry["position_ids"] = [int(i) for i in signed.wire["positionIds"]]
         # Recorded before sending: if we crash mid-request, the intent still counts until its deadline.
         self._set_inflight(signed.intent_id, entry)
         self.audit.write("submit", action=action, intent_id=signed.intent_id, signed=signed.unsigned(), **context)

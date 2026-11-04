@@ -221,6 +221,28 @@ def test_acknowledged_open_counts_until_the_stream_shows_it(setup):
     assert len(api.submitted) == 2
 
 
+def test_outcomes_outlive_the_process_that_saw_them(setup):
+    # 2026-11-04: `open --live` and `close-all --live` exited before their outcomes arrived; once the
+    # position had closed, later processes counted the open as in flight until its one-hour deadline.
+    wallet, session_key, make = setup
+    keys = [[session_key.address.lower(), str(int(NOW) + 30 * 86400)]]
+    limits = Limits(max_margin_usd=50, max_leverage=100, max_open_positions=1, max_total_margin_usd=100)
+    trader, api, store = make(limits=limits)
+    opened = trader.open("BTC", "long", "10", 50).submissions[0].intent_id
+
+    with_position = account_frame(address=wallet.address.lower(), session_keys=keys, positions=[position_tuple(intent_id=opened)])
+    trader, api, store = make(limits=limits, frame=with_position)
+    trader._record_outcomes(trader.stream.state())
+    closed = trader.close([1]).submissions[0].intent_id
+    assert [i["intent_id"] for i in trader.inflight()] == [closed]
+
+    later, api, store = make(limits=limits)  # a new process: the position is gone, no outcome event seen
+    assert later.intent_status(opened) == "succeeded" and later.intent_status(closed) == "positions_closed"
+    assert later.inflight() == []
+    later.open("BTC", "long", "10", 50)
+    assert len(api.submitted) == 1
+
+
 def test_refused_open_is_not_left_in_flight(setup):
     _, _, make = setup
     trader, api, store = make()
