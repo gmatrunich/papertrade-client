@@ -31,6 +31,8 @@ _EMPTY: dict[str, Any] = {
     # submitted opens not yet visible on the account stream:
     # {intent_id, action, deadline, submitted_at, acknowledged}
     "inflight": [],
+    # exit plans attached to opens, for the exit engine: {intent_id: {"plan": {...}, "created_at": t}}
+    "exit_plans": {},
 }
 
 
@@ -108,7 +110,9 @@ class AuditLog:
         self._lock = threading.Lock()
 
     def write(self, event: str, **fields: Any) -> None:
-        line = json.dumps({"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "event": event, **fields}, default=str)
+        now = time.time()
+        stamp = {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)), "ts": round(now, 3)}
+        line = json.dumps({**stamp, "event": event, **fields}, default=str)
         with self._lock:
             fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             with os.fdopen(fd, "a") as handle:

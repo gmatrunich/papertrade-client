@@ -27,6 +27,7 @@ INFLIGHT_ALERT_S = 300  # an open the relayer accepted but the account stream st
 BUST_ALERT_FRACTION = 0.3  # alert when less than this share of the entry-to-bust distance is left
 CONFIRM_AFTER_S = 300  # Papertrade's API drops out for 2-4 minutes several times a day; alert when it lasts longer
 DRIFT_MAX_AGE_S = 3 * 3600  # the drift timer runs hourly; allow two failed observations
+EXITS_SILENT_S = 120  # the exit engine writes a heartbeat every 10 s and systemd restarts it within 5 s
 HEARTBEAT_HOUR_UTC = 7
 
 
@@ -48,15 +49,18 @@ class Observation:
     positions: list[dict[str, Any]] = field(default_factory=list)
     drift: dict[str, Any] | None = None  # the drift monitor's --json report plus its file mtime
     drift_observed_at: float | None = None  # mtime of the last report that was not an error (kept by run())
+    exits: dict[str, Any] | None = None  # the exit engine's heartbeat
 
 
 def observe(env: dict[str, str] | None = None) -> Observation:
     """Gather everything the checks need; a source that fails is recorded, never raised."""
     from .client import PapertradeClient
     from .config import data_dir, load
+    from .exits import read_heartbeat
 
     obs = Observation(now=time.time())
     obs.drift = _read_drift(Path(data_dir(env)) / DRIFT_REPORT)
+    obs.exits = read_heartbeat(data_dir(env))
     try:
         config = load(env)
     except ValueError as error:
@@ -127,6 +131,20 @@ def problems(obs: Observation) -> dict[str, str]:
             where = f"mark {p['mark']:.1f}, bust {p['bust']:.1f} ({left:.0%} of the distance left)"
             out[f"bust:{p['position_id']}"] = f"{p['market']} {p['side']} #{p['position_id']} near bust: {where}"
     out.update(_drift_problems(obs))
+    out.update(_exit_problems(obs))
+    return out
+
+
+def _exit_problems(obs: Observation) -> dict[str, str]:
+    beat = obs.exits
+    if beat is None:
+        return {"exits_missing": "positions are open but the exit engine has never run"} if obs.positions else {}
+    out = {}
+    silent = obs.now - beat["at"]
+    if silent > EXITS_SILENT_S:
+        out["exits_silent"] = f"exit engine silent for {silent / 60:.0f} min: open positions have no stops"
+    if obs.mode == "live" and beat.get("mode") != "live":
+        out["exits_dry_run"] = "trading is live but the exit engine runs dry-run: restart papertrade-exits"
     return out
 
 

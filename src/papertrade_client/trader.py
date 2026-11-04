@@ -12,6 +12,7 @@ past the limits. Closes take no lock and never wait on market data.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import threading
 import time
@@ -24,6 +25,7 @@ from eth_account.signers.local import LocalAccount
 from . import deployment, guards, payout, protocol
 from .api import AcknowledgementUnknown, PapertradeApi
 from .config import Config
+from .exits import ExitPlan
 from .guards import GuardError
 from .hyperliquid import HyperliquidInfo
 from .session import SessionManager
@@ -315,7 +317,16 @@ class Trader:
 
     # -- writes -------------------------------------------------------------------
 
-    def open(self, market: str, side: str, margin_usd: str | float, leverage: int, dry_run: bool | None = None) -> WriteResult:
+    def open(
+        self,
+        market: str,
+        side: str,
+        margin_usd: str | float,
+        leverage: int,
+        dry_run: bool | None = None,
+        exit_plan: ExitPlan | None = None,
+    ) -> WriteResult:
+        """``exit_plan`` is stored under the intent id; the exit engine applies it once the position shows."""
         if side not in ("long", "short"):
             raise ValueError("side must be 'long' or 'short'")
         m = deployment.MARKETS[market]
@@ -375,12 +386,22 @@ class Trader:
                 raise GuardError([guards.Violation("session_invalid", "no registered session key")])
             message["nonce"] = self.store.take_nonce("exchange", deployment.EXCHANGE, self.wallet.address)
             signed = protocol.sign(signer, "OpenPosition", message)
-            submission = self._submit(signed, market=market, side=side, margin_usd=str(margin_usd), leverage=leverage, mid=bbo.mid)
+            plan = dataclasses.asdict(exit_plan) if exit_plan else None
+            if plan:
+                # Before submitting, so the engine can never see the position without its plan.
+                record = {"plan": plan, "created_at": self.clock()}
+                self.store.update(lambda s: s["exit_plans"].__setitem__(signed.intent_id, record))
+            submission = self._submit(
+                signed, market=market, side=side, margin_usd=str(margin_usd), leverage=leverage, mid=bbo.mid, exit_plan=plan
+            )
             return WriteResult("live", "openPosition", signed.unsigned(), [submission], quote=quote)
 
-    def close(self, position_ids: list[int], dry_run: bool | None = None, force: bool = False) -> WriteResult:
+    def close(
+        self, position_ids: list[int], dry_run: bool | None = None, force: bool = False, context: dict[str, Any] | None = None
+    ) -> WriteResult:
         """Close positions in batches of 12. ``force`` skips the account checks and signs with the
-        newest stored session key, for when the account stream is down but the relayer is not."""
+        newest stored session key, for when the account stream is down but the relayer is not.
+        ``context`` goes into the audit log with each batch (the exit engine records why and at what mark)."""
         ids = list(dict.fromkeys(int(i) for i in position_ids))
         live = self._live(dry_run)
         account = self.stream.state()
@@ -413,7 +434,7 @@ class Trader:
                 },
             )
             result.message["batches"].append(signed.unsigned())
-            result.submissions.append(self._submit(signed, position_ids=chunk))
+            result.submissions.append(self._submit(signed, position_ids=chunk, **(context or {})))
         result.warnings = self._bust_warnings(ids)  # after sending: informational only
         return result
 

@@ -9,8 +9,12 @@ import argparse
 import dataclasses
 import json
 import logging
+import math
 import os
+import re
+import secrets
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +25,16 @@ from .trader import GuardError, WriteResult
 
 # A close waited 46 s for its batch on 2026-11-04; give live writes a minute and a half to settle.
 OUTCOME_WAIT_S = 90
+# The probe opens only while the exit engine has reported within this window.
+EXITS_FRESH_S = 60
+
+
+def _duration(text: str) -> float:
+    """Seconds from "300", "300s", "5m", "2h" or "1d"."""
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)([smhd]?)", text.strip())
+    if not match:
+        raise argparse.ArgumentTypeError(f"not a duration: {text!r} (e.g. 300, 5m, 2h, 1d)")
+    return float(match[1]) * {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}[match[2]]
 
 
 def _print(value: Any) -> None:
@@ -189,8 +203,12 @@ def cmd_session(args: argparse.Namespace) -> int:
 
 
 def cmd_open(args: argparse.Namespace) -> int:
+    from .exits import ExitPlan
+
+    plan = ExitPlan(args.stop, args.take, args.max_hold) if (args.stop, args.take, args.max_hold) != (None, None, None) else None
     client = _client(args)
-    return _write(client.trader.open(args.market, args.side, args.margin, args.leverage, dry_run=not args.live), client)
+    result = client.trader.open(args.market, args.side, args.margin, args.leverage, dry_run=not args.live, exit_plan=plan)
+    return _write(result, client)
 
 
 def cmd_close(args: argparse.Namespace) -> int:
@@ -265,6 +283,52 @@ def _drift(args: argparse.Namespace) -> int:
     return report.exit_code()
 
 
+def cmd_exits(args: argparse.Namespace) -> int:
+    from . import watchdog
+    from .client import PapertradeClient
+    from .exits import ExitEngine
+
+    logging.getLogger("papertrade_client").setLevel(logging.INFO)  # only ours: httpx would log the Telegram token
+    ExitEngine(PapertradeClient.from_env().trader, watchdog.Notifier.from_env(), poll_s=args.poll).run_forever()
+    return 0
+
+
+def cmd_probe(args: argparse.Namespace) -> int:
+    """One minimum-size trade with a random side, closed by the exit engine after --hold."""
+    from .exits import ExitPlan, read_heartbeat
+
+    client = _client(args)
+    beat = read_heartbeat(client.store.dir)
+    if args.live and client.config.live_trading and (not beat or beat.get("mode") != "live" or time.time() - beat["at"] > EXITS_FRESH_S):
+        print("refused: the exit engine is not running live, nothing would close the probe", file=sys.stderr)
+        return 1
+    trading = client.api.trading_state()
+    margin = trading.minimum_trade_size_raw / 1e18
+    leverage = math.ceil(trading.minimum_open_notional_raw / trading.minimum_trade_size_raw)
+    side = secrets.choice(("long", "short"))
+    plan = ExitPlan(max_hold_s=args.hold)
+    return _write(client.trader.open(args.market, side, f"{margin:g}", leverage, dry_run=not args.live, exit_plan=plan), client)
+
+
+def cmd_reconcile(args: argparse.Namespace) -> int:
+    from . import reconcile, watchdog
+
+    client = _client(args, require_snapshot=False)
+    since = time.time() - args.since if args.since else None
+    account = client.stream.state()
+    open_intents = {p.intent_id for p in account.open_positions if p.intent_id} if account else None
+    trades = reconcile.fetch_trades(client.api, client.address, since)
+    report = reconcile.reconcile(reconcile.read_audit(client.audit.path), trades, client.api.trading_state(), since, open_intents)
+    text = reconcile.digest(report, args.since / 3600 if args.since else None)
+    if args.notify:
+        watchdog.Notifier.from_env().send(text)
+    if args.digest:
+        print(text)
+    else:
+        _print(report)
+    return 1 if report["discrepancies"] else 0
+
+
 def cmd_watchdog(args: argparse.Namespace) -> int:
     from . import watchdog
     from .config import data_dir
@@ -311,6 +375,9 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("margin", help="margin in USD, e.g. 10")
         p.add_argument("leverage", type=int)
         p.add_argument("--live", action="store_true")
+        p.add_argument("--stop", type=float, metavar="PCT", help="exit plan: close after this adverse move, %% of entry")
+        p.add_argument("--take", type=float, metavar="PCT", help="exit plan: close after this favourable move, %% of entry")
+        p.add_argument("--max-hold", type=_duration, metavar="DURATION", help="exit plan: close after this long (5m, 2h)")
         p.set_defaults(fn=fn)
 
     p = sub.add_parser("close", help="close positions by id")
@@ -345,6 +412,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pin", action="store_true", help="write the live protocol as the new baseline")
     p.add_argument("--kill-on-breaking", action="store_true", help="engage the local kill switch on breaking drift")
     p.set_defaults(fn=cmd_drift)
+
+    p = sub.add_parser("exits", help="run the exit engine: stops, take-profits, holding limits (long-running)")
+    p.add_argument("--poll", type=float, default=1.0, help="seconds between passes")
+    p.set_defaults(fn=cmd_exits)
+
+    p = sub.add_parser("probe", help="execution probe: one minimum-size trade, random side, timed exit")
+    p.add_argument("--market", choices=["BTC", "ETH"], default="BTC")
+    p.add_argument("--hold", type=_duration, default=300, help="close after this long (default 5m)")
+    p.add_argument("--live", action="store_true")
+    p.set_defaults(fn=cmd_probe)
+
+    p = sub.add_parser("reconcile", help="audit log against the trade history: latency, slippage, payout")
+    p.add_argument("--since", type=_duration, help="only positions closed within this window (24h)")
+    p.add_argument("--digest", action="store_true", help="print the short text digest instead of JSON")
+    p.add_argument("--notify", action="store_true", help="also send the digest to Telegram")
+    p.set_defaults(fn=cmd_reconcile)
 
     p = sub.add_parser("watchdog", help="health check; alerts to Telegram when a problem appears or clears")
     p.add_argument("--test", action="store_true", help="also send the daily summary now")

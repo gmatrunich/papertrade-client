@@ -1,0 +1,9 @@
+[Unit]
+Description=Papertrade execution probe about every 4 hours (not enabled by install.sh)
+
+[Timer]
+OnCalendar=00/4:00
+RandomizedDelaySec=2h
+
+[Install]
+WantedBy=timers.target
