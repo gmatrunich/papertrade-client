@@ -20,7 +20,7 @@ from typing import Any
 
 from eth_account import Account
 
-from . import drift
+from . import drift, guards
 from .trader import GuardError, WriteResult
 
 # A close waited 46 s for its batch on 2026-11-04; give live writes a minute and a half to settle.
@@ -106,7 +106,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             "kill_switch": client.store.kill_switch(),
             "session": client.trader.session.status(),
             "stream_age_s": client.stream.age_s(),
-            "indexer_lag_s": account and client.trader.clock() - account.indexed_through_timestamp,
+            "indexer_lag_s": account and guards.indexer_lag_s(account, trading, client.trader.clock()),
             "inflight": client.trader.inflight(),
             "balances_usd": account
             and {
