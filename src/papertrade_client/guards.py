@@ -10,15 +10,29 @@ from .wire import AccountState, Instrument, TradingState
 
 WAD = 10**18
 MIN_SESSION_VALIDITY_S = 3600
-# The stream re-baselines from a full snapshot every 5 minutes, so even an idle
-# account's indexer timestamp should never fall further behind than this.
 MAX_INDEXER_LAG_S = 600
+# HyperEVM makes a small block every second and a large one every minute: 61 blocks a minute
+# (measured 2026-11-05: 346 blocks in 342 s). Erring high reads the lag slightly long rather than short.
+HYPEREVM_BLOCKS_PER_S = 61 / 60
 
 
 @dataclass(frozen=True)
 class Violation:
     code: str
     message: str
+
+
+def indexer_lag_s(account: AccountState, trading: TradingState, now_s: float) -> float:
+    """How far Papertrade's indexer is behind the chain, in seconds.
+
+    Not ``now - account.indexed_through_timestamp``: that timestamp moves only when the account
+    changes or the serving instance rebuilds its copy, and each instance keeps its own. A fresh
+    connection to an idle account got copies 971-6624 s old on 2026-11-05 while /state/trading
+    was 2-17 blocks behind the chain head. /state/trading's ``indexedThroughBlock`` follows the
+    indexer itself; the account frame ties one block to a time, which dates it.
+    """
+    blocks_since = trading.indexed_through_block - account.indexed_through_block
+    return now_s - account.indexed_through_timestamp - blocks_since / HYPEREVM_BLOCKS_PER_S
 
 
 class GuardError(Exception):
@@ -93,9 +107,9 @@ def check_open(c: OpenCheck) -> list[Violation]:
     else:
         if c.account_age_s is None or c.account_age_s > c.snapshot_max_age_s:
             add("account_stale", "account stream is silent")
-        lag_s = c.now_s - a.indexed_through_timestamp
+        lag_s = indexer_lag_s(a, t, c.now_s)
         if lag_s > MAX_INDEXER_LAG_S:
-            add("account_stale", f"account data is {lag_s:.0f} s behind (indexer lag)")
+            add("account_stale", f"Papertrade's indexer is {lag_s:.0f} s behind the chain (indexer lag)")
         pending_opens = sum(1 for op in a.operations if op.action == "openPosition") + c.inflight_opens
         if len(a.open_positions) + pending_opens >= limits.max_open_positions:
             add("limit_positions", f"open + pending positions reached MAX_OPEN_POSITIONS {limits.max_open_positions}")

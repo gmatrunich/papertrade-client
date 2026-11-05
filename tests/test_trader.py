@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import time
 
 import pytest
 from eth_account import Account
 
-from papertrade_client import protocol, wire
+from papertrade_client import guards, protocol, wire
 from papertrade_client.api import AcknowledgementUnknown, PapertradeError
 from papertrade_client.config import Config, Limits
 from papertrade_client.hyperliquid import Bbo
@@ -252,13 +253,27 @@ def test_refused_open_is_not_left_in_flight(setup):
     assert store.read()["inflight"] == []
 
 
-def test_stale_indexer_blocks_opens(setup):
-    wallet, session_key, make = setup
+def _dated_frame(wallet, session_key, trading, age_s, blocks_behind_indexer):
     frame = account_frame(address=wallet.address.lower(), session_keys=[[session_key.address.lower(), str(int(NOW) + 30 * 86400)]])
-    frame["indexedThroughTimestamp"] = int(NOW) - 3600
-    trader, api, _ = make(frame=frame)
+    frame["indexedThroughTimestamp"] = int(NOW - age_s)
+    frame["indexedThroughBlock"] = trading.indexed_through_block - blocks_behind_indexer
+    return frame
+
+
+def test_stale_indexer_blocks_opens(setup, trading):
+    wallet, session_key, make = setup
+    # The account copy is an hour old and the indexer has not moved since.
+    trader, api, _ = make(frame=_dated_frame(wallet, session_key, trading, age_s=3600, blocks_behind_indexer=0))
     with pytest.raises(GuardError, match="indexer lag"):
         trader.open("BTC", "long", "10", 50)
+
+
+def test_an_idle_account_with_a_current_indexer_can_open(setup, trading):
+    wallet, session_key, make = setup
+    # An idle account served from an instance whose copy is two hours old, while the indexer
+    # has kept up with the chain (61 blocks a minute): what refused a third of the probes on 2026-11-05.
+    trader, api, _ = make(frame=_dated_frame(wallet, session_key, trading, age_s=7200, blocks_behind_indexer=7320))
+    assert trader.open("BTC", "long", "10", 50).violations == []
 
 
 def test_force_close_works_without_the_account_stream(setup):
@@ -328,3 +343,14 @@ def test_store_is_shared_between_processes(tmp_path):
     strategy.take_nonce("exchange", "0xc", "0xu")  # must not revert the operator's kill switch
     assert operator.kill_switch()["engaged"]
     assert (tmp_path / "data" / "state.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_indexer_lag_is_dated_by_the_indexer_block(trading):
+    frame = account_frame()
+    # Sampled on 2026-11-05: an account copy 342 s old, the indexer 346 blocks further on.
+    frame["indexedThroughTimestamp"], frame["indexedThroughBlock"] = int(NOW) - 342, 50_440_087
+    account = wire.parse_account_snapshot(frame)
+    current = dataclasses.replace(trading, indexed_through_block=50_440_433)
+    assert guards.indexer_lag_s(account, current, NOW) == pytest.approx(1.7, abs=0.1)
+    stuck = dataclasses.replace(trading, indexed_through_block=50_440_087)
+    assert guards.indexer_lag_s(account, stuck, NOW) == 342

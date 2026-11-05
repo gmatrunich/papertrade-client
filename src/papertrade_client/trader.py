@@ -445,9 +445,13 @@ class Trader:
         closing = {pid for op in account.operations if op.action == "closePositions" for pid in (op.position_ids or ())}
         result = self.close([p.position_id for p in account.open_positions if p.position_id not in closing], dry_run)
         age = self.stream.age_s()
-        lag = self.clock() - account.indexed_through_timestamp
-        if age is None or age > self.config.snapshot_max_age_s or lag > guards.MAX_INDEXER_LAG_S:
-            stale = f"account data may be stale (stream {age} s, indexer {lag:.0f} s): positions opened since may be missed"
+        try:
+            lag: float | None = guards.indexer_lag_s(account, self.api.trading_state(max_age_s=60), self.clock())
+        except Exception:  # a close-all must not fail on market data; unknown lag reads as stale
+            lag = None
+        if age is None or age > self.config.snapshot_max_age_s or lag is None or lag > guards.MAX_INDEXER_LAG_S:
+            lag_text = "unknown" if lag is None else f"{lag:.0f} s"
+            stale = f"account data may be stale (stream {age} s, indexer {lag_text}): positions opened since may be missed"
             result.warnings.insert(0, stale)
         return result
 
