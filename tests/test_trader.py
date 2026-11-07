@@ -345,6 +345,14 @@ def test_store_is_shared_between_processes(tmp_path):
     assert (tmp_path / "data" / "state.json").stat().st_mode & 0o777 == 0o600
 
 
+def test_a_write_cut_short_leaves_no_copy_of_the_state(tmp_path):
+    store = StateStore(tmp_path / "data")
+    orphan = store.dir / ".state.dead1234.tmp"  # what a writer killed between mkstemp and os.replace leaves
+    orphan.write_text('{"session_keys": [{"private_key": "0x..."}]}')
+    store.update(lambda s: s["nonces"].__setitem__("k", "1"))
+    assert not orphan.exists() and store.read()["nonces"] == {"k": "1"}
+
+
 def test_indexer_lag_is_dated_by_the_indexer_block(trading):
     frame = account_frame()
     # Sampled on 2026-11-05: an account copy 342 s old, the indexer 346 blocks further on.

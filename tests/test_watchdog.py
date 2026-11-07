@@ -53,7 +53,7 @@ def test_healthy_has_no_problems():
     [
         ({"kill_switch": {"engaged": True, "reason": "protocol drift: x"}}, "kill_switch"),
         ({"trading_paused": True}, "trading_paused"),
-        ({"paused_actions": ["openPosition"]}, "paused_actions"),
+        ({"paused_actions": ["openPosition"]}, "paused:openPosition"),
         ({"stream_age_s": 120}, "stream_stale"),
         ({"session_valid_for_s": 3600}, "session_expiring"),
         ({"session_valid_for_s": None}, "session_missing"),
@@ -165,6 +165,24 @@ def test_failed_send_is_retried(tmp_path):
     notifier = Recorder()
     watchdog.run(tmp_path, notifier, healthy(trading_paused=True))
     assert "🔴 Papertrade has paused trading" in notifier.sent
+
+
+def test_a_pause_that_spreads_to_closes_alerts_again(tmp_path):
+    # 2026-11-07: Papertrade paused openPosition at 08:06 and closePositions too at 08:10.
+    notifier = Recorder()
+    watchdog.run(tmp_path, notifier, healthy(paused_actions=["openPosition"]))
+    watchdog.run(
+        tmp_path,
+        notifier,
+        healthy(paused_actions=["openPosition", "closePositions"], positions=[position(mark=100.0)], exits={"at": NOW, "mode": "live"}),
+    )
+    watchdog.run(tmp_path, notifier, healthy(paused_actions=[]))
+    assert [m for m in notifier.sent if not m.startswith("papertrade daily")] == [
+        "🔴 Papertrade paused openPosition",
+        "🔴 Papertrade paused closePositions: 1 open position(s) cannot be closed",
+        "✅ cleared: Papertrade paused openPosition",
+        "✅ cleared: Papertrade paused closePositions: 1 open position(s) cannot be closed",
+    ]
 
 
 def test_reads_drift_report(tmp_path):

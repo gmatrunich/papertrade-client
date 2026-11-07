@@ -59,6 +59,11 @@ class StateStore:
 
     def update(self, mutate: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
         with self._exclusive():
+            # Under the lock no other write is in progress, so a temporary file left here belongs to a
+            # writer that died mid-write. It holds a copy of the session key: remove it.
+            for orphan in self.dir.glob(".state.*.tmp"):
+                with contextlib.suppress(FileNotFoundError):
+                    orphan.unlink()
             state = self.read()
             mutate(state)
             fd, tmp = tempfile.mkstemp(dir=self.dir, prefix=".state.", suffix=".tmp")  # 0600

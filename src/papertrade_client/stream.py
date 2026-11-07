@@ -7,6 +7,7 @@ keeps the reduced state in a background thread and reconnects on its own.
 
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import threading
@@ -78,6 +79,9 @@ class AccountStream:
         self._last_event_at: float | None = None
         self._cond = threading.Condition()
         self._running = False
+        self._stopped = False
+        self._dispatch = threading.Lock()  # held while listeners run; stop() waits on it
+        self._exit_hook = False
         self._thread: threading.Thread | None = None
         self.last_error: str | None = None
 
@@ -85,13 +89,22 @@ class AccountStream:
 
     def start(self) -> AccountStream:
         if not self._running:
-            self._running = True
+            self._running, self._stopped = True, False
+            if not self._exit_hook:
+                # The stream thread is a daemon, and the interpreter kills daemons where they stand. A
+                # command that returns while a listener is writing state.json would lose that write.
+                atexit.register(self.stop)
+                self._exit_hook = True
             self._thread = threading.Thread(target=self._loop, name="papertrade-account-stream", daemon=True)
             self._thread.start()
         return self
 
-    def stop(self) -> None:
-        self._running = False
+    def stop(self, timeout_s: float = 5) -> None:
+        """Stop the stream. Listeners already running are allowed to finish (they write state.json),
+        and none runs after this returns."""
+        self._running, self._stopped = False, True
+        if threading.current_thread() is not self._thread and self._dispatch.acquire(timeout=timeout_s):
+            self._dispatch.release()
 
     def add_listener(self, listener: Callable[[wire.AccountState], None]) -> None:
         """Called from the stream thread after every applied wallet frame."""
@@ -138,11 +151,14 @@ class AccountStream:
             self._cond.notify_all()
             state = self._state
         if event == "wallet" and state is not None:
-            for listener in self._listeners:
-                try:
-                    listener(state)
-                except Exception:
-                    log.exception("account listener failed")
+            with self._dispatch:
+                if self._stopped:
+                    return
+                for listener in self._listeners:
+                    try:
+                        listener(state)
+                    except Exception:
+                        log.exception("account listener failed")
 
     def _connect_once(self) -> None:
         started = time.monotonic()
