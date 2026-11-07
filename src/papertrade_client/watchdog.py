@@ -114,8 +114,12 @@ def problems(obs: Observation) -> dict[str, str]:
         out["kill_switch"] = f"kill switch engaged: {obs.kill_switch.get('reason') or 'no reason given'}"
     if obs.trading_paused:
         out["trading_paused"] = "Papertrade has paused trading"
-    if obs.paused_actions:
-        out["paused_actions"] = f"Papertrade paused actions: {', '.join(obs.paused_actions)}"
+    # One key per action: a pause that spreads from opens to closes is a new alert, not the same one reworded.
+    for action in obs.paused_actions:
+        if action == "closePositions" and obs.positions:
+            out[f"paused:{action}"] = f"Papertrade paused closePositions: {len(obs.positions)} open position(s) cannot be closed"
+        else:
+            out[f"paused:{action}"] = f"Papertrade paused {action}"
     if obs.balance_usd and obs.session_valid_for_s is None and obs.mode == "live":
         out["session_missing"] = "no active session key: trades cannot be signed (`papertrade session register`)"
     elif obs.session_valid_for_s is not None and obs.session_valid_for_s < obs.session_renew_before_s:
