@@ -118,6 +118,11 @@ class PapertradeApi:
         if not retried and response.status_code < 500 and _STALE_BUILD.search(f"{code} {message}"):
             self.build_id(refresh=True)
             return self._request(method, path, body, timeout_s, retried=True)
+        canonical = record.get("canonical")
+        if not retried and method == "GET" and isinstance(canonical, str) and canonical.startswith("/") and canonical != path:
+            # The query routes refuse a URL that is not in their canonical form and name the one they want.
+            log.warning("papertrade wants %s for %s", canonical, path)
+            return self._request(method, canonical, body, timeout_s, retried=True)
         retry_after = response.headers.get("retry-after")
         raise PapertradeError(
             message, response.status_code, code, payload, float(retry_after) if retry_after and retry_after.isdigit() else None
@@ -159,7 +164,9 @@ class PapertradeApi:
         """kind: trades | cashflows | staking | queue. The indexer only accepts limit=75."""
         if kind not in ("trades", "cashflows", "staking", "queue"):
             raise ValueError(f"unknown history kind {kind!r}")
-        query = "limit=75" + (f"&cursor={quote(cursor, safe='')}" if cursor else "")
+        # Parameters in the indexer's canonical (alphabetical) order: since 2026-11-10 at the latest it
+        # refuses any other order with 400, so a cursor after the limit failed every page past the first.
+        query = (f"cursor={quote(cursor, safe='')}&" if cursor else "") + "limit=75"
         return self.get(f"/query/accounts/{user.lower()}/{kind}?{query}")
 
     def deposit_address(self, user: str) -> str:
