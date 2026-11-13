@@ -95,6 +95,7 @@ uv run papertrade positions
 uv run papertrade close-all --live
 uv run papertrade close 123 --live --force    # account stream down: sign with the stored session key
 uv run papertrade kill-switch on --reason "maintenance"
+uv run papertrade probe-pair                  # hedge probe, dry run: guards and the model's cost of the pair
 ```
 
 ```python
@@ -131,6 +132,28 @@ side and a 5-minute holding limit, refused unless the exit engine is running liv
 latency and fills for a few cents a trade. `papertrade reconcile` matches the audit log with the trade history:
 open and close latency, entry slippage against the mid at signing, exit slippage against the mark at the exit
 decision, booked payout against `payout.settle`, and anything that does not line up.
+
+### Hedge pairs
+
+`papertrade probe-pair` opens one long and one short of the same market, margin and leverage ($10 × 50 each) and
+closes both together after `--hold` (default 5 minutes). It exists to measure, for a few cents a pair, what a
+hedge costs and whether it earns $PAPER at the modelled rate (`papertrade_client.trader.pair_cost_curve` and the
+`pair_cost_curve` of the dry run give the model's number):
+
+- **Limits.** The pair is held to the same limits as two opens: `PAPERTRADE_MAX_OPEN_POSITIONS` of at least 2 and
+  `PAPERTRADE_MAX_TOTAL_MARGIN_USD` of at least 20. Both legs are checked before either is signed, so a refusal
+  sends nothing. `probe-pair` without `--live` shows the guards' verdict and the model's pair cost.
+- **Sending.** The two open intents are submitted from two threads; the relayer may still execute them in
+  different batches. `papertrade reconcile` shows whether they did (`same_entry`, `entry_gap_bps`).
+- **Closing.** The exit engine closes both legs in one `Close` intent when either is due (holding limit, safety
+  stop), so they execute in one batch at one mark. A pair that has lost a leg (refused, liquidated, not open
+  `PAIR_GRACE_S` after its partner) is no longer a hedge: the leg that is left is closed at once. If one open is
+  refused after the other was sent, `probe-pair` exits 1 with `pair_broken` and the survivor's plan closes it as
+  soon as it shows.
+- **Report.** `papertrade reconcile` lists a `pairs` section: entry and exit gap between the legs, whether they
+  closed in one transaction, the pair's net PnL against the model, $PAPER minted against the mint basis, and the
+  cost per $1 of basis. `basis_per_loss` is 0.98 when the loser's basis is its full loss (less the 2% fee), and
+  lower if the winning leg offset it.
 
 ## Safety model
 
@@ -192,7 +215,7 @@ and share the default data directory:
 | `papertrade-drift` | hourly | `papertrade drift --kill-on-breaking`, report saved as `drift.json` in the data directory |
 | `papertrade-watchdog` | every 2 minutes | `papertrade watchdog`: alerts to Telegram when a problem appears or clears |
 | `papertrade-reconcile` | daily, 07:10 UTC | `papertrade reconcile --since 24h`, digest to Telegram |
-| `papertrade-probe` | about once an hour (at least 10 min apart) | `papertrade probe --live`; installed but **not enabled** by `install.sh` |
+| `papertrade-probe` | about once an hour (at least 10 min apart) | `papertrade probe --live`; installed but **not enabled** by `install.sh`. `probe-pair` has no timer: run it by hand |
 
 The watchdog reports: account stream unavailable or silent, kill switch engaged, Papertrade paused, session
 key missing or expiring, an open accepted by the relayer but not on the stream after 5 minutes, a position
