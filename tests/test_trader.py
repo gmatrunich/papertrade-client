@@ -10,10 +10,11 @@ from eth_account import Account
 from papertrade_client import guards, protocol, wire
 from papertrade_client.api import AcknowledgementUnknown, PapertradeError
 from papertrade_client.config import Config, Limits
+from papertrade_client.exits import ExitPlan
 from papertrade_client.hyperliquid import Bbo
 from papertrade_client.store import AuditLog, StateStore
 from papertrade_client.stream import OutcomeLog
-from papertrade_client.trader import GuardError, Trader
+from papertrade_client.trader import GuardError, PairBroken, Trader, pair_cost_curve
 
 from .conftest import account_frame, position_tuple
 
@@ -362,3 +363,95 @@ def test_indexer_lag_is_dated_by_the_indexer_block(trading):
     assert guards.indexer_lag_s(account, current, NOW) == pytest.approx(1.7, abs=0.1)
     stuck = dataclasses.replace(trading, indexed_through_block=50_440_087)
     assert guards.indexer_lag_s(account, stuck, NOW) == 342
+
+
+# -- hedge pairs ------------------------------------------------------------------
+
+
+def test_pair_dry_run_sends_nothing_and_prices_the_pair(setup):
+    _, _, make = setup
+    trader, api, store = make(live=False)
+    result = trader.open_pair("BTC", "10", 50, dry_run=False)  # live trading is off: still a dry run
+    assert result.mode == "dry-run" and result.action == "openPair" and not result.violations
+    assert result.message["long"]["isLong"] is True and result.message["short"]["isLong"] is False
+    assert not api.submitted and store.read()["exit_plans"] == {}
+    curve = result.quote["pair_cost_curve"]
+    assert all(point["net_usd"] < 0 for point in curve)  # the winner's haircut makes every ending a loss
+    assert [p["move_pct"] for p in curve] == sorted(p["move_pct"] for p in curve)
+
+
+def test_pair_cost_curve_is_the_winner_payout_less_the_loser_loss():
+    keep = [{"move_pct": 0.1, "keep": 0.74, "payout_usd": 0.37}]
+    [point] = pair_cost_curve(keep, 500)
+    assert point["loser_loss_usd"] == pytest.approx(0.5)
+    assert point["net_usd"] == pytest.approx(-0.13) and point["net_bps_of_leg"] == pytest.approx(-2.6)
+
+
+def test_live_pair_sends_both_legs_with_a_shared_plan(setup):
+    wallet, session_key, make = setup
+    trader, api, store = make()
+    result = trader.open_pair("BTC", "10", 50, exit_plan=ExitPlan(max_hold_s=300))
+    assert result.mode == "live" and result.action == "openPair" and len(result.submissions) == 2
+    assert sorted(a for a, *_ in api.submitted) == ["openPosition", "openPosition"]
+    by_side = {s["isLong"]: s for _, s, _, _ in api.submitted}
+    assert set(by_side) == {True, False}
+    assert abs(int(by_side[True]["nonce"]) - int(by_side[False]["nonce"])) == 1
+    for signed in by_side.values():
+        message = {k: signed[k] for k in ("user", "instrumentId", "isLong", "size", "leverage", "useDebt", "nonce", "deadline")}
+        recovered = protocol.recover("OpenPosition", message, int(signed["v"]), int(signed["r"], 16), int(signed["s"], 16))
+        assert recovered == session_key.address.lower()
+    plans = store.read()["exit_plans"]
+    legs = sorted(i for _, _, i, _ in api.submitted)
+    assert sorted(plans) == legs
+    assert {p["pair"]["id"] for p in plans.values()} == {result.message["pair"]}
+    assert all(sorted(p["pair"]["legs"]) == legs and p["plan"]["max_hold_s"] == 300 for p in plans.values())
+    events = [json.loads(line) for line in (store.dir / "audit.jsonl").read_text().splitlines()]
+    assert [e["event"] for e in events].count("pair") == 1
+    submits = [e for e in events if e["event"] == "submit"]
+    assert len(submits) == 2 and {e["pair"] for e in submits} == {result.message["pair"]}
+
+
+def test_a_pair_that_does_not_fit_the_limits_sends_nothing(setup):
+    _, _, make = setup
+    one_position = Limits(max_margin_usd=50, max_leverage=100, max_open_positions=1, max_total_margin_usd=100)
+    trader, api, store = make(limits=one_position)
+    with pytest.raises(GuardError, match="MAX_OPEN_POSITIONS"):
+        trader.open_pair("BTC", "10", 50)  # the first leg fits, the second does not
+    tight = Limits(max_margin_usd=50, max_leverage=100, max_open_positions=2, max_total_margin_usd=10)
+    trader, api, store = make(limits=tight)
+    with pytest.raises(GuardError, match="MAX_TOTAL_MARGIN_USD"):
+        trader.open_pair("BTC", "10", 50)
+    assert not api.submitted and store.read()["exit_plans"] == {} and store.read()["inflight"] == []
+    # The dry run says the same without sending anything.
+    result = trader.open_pair("BTC", "10", 50, dry_run=True)
+    assert {v.code for v in result.violations} == {"limit_total_margin"}
+
+
+def test_a_refused_leg_leaves_the_other_closing_at_once(setup):
+    _, _, make = setup
+    trader, api, store = make()
+    send = api.submit
+
+    def refuse_the_short(action, signed, intent_id, extra=None):
+        if signed["isLong"] is False:
+            raise PapertradeError("nope", 422, "invalid_signature", {"error": "invalid_signature"})
+        return send(action, signed, intent_id, extra)
+
+    api.submit = refuse_the_short
+    with pytest.raises(PairBroken, match="short leg refused") as broken:
+        trader.open_pair("BTC", "10", 50, exit_plan=ExitPlan(max_hold_s=300))
+    [sent] = broken.value.result.submissions
+    plans = store.read()["exit_plans"]
+    assert list(plans) == [sent.intent_id] and plans[sent.intent_id]["plan"]["max_hold_s"] == 0
+    assert [i["intent_id"] for i in store.read()["inflight"]] == [sent.intent_id]
+    events = [json.loads(line)["event"] for line in (store.dir / "audit.jsonl").read_text().splitlines()]
+    assert "pair_broken" in events and "rejected" in events
+
+
+def test_both_legs_refused_leaves_nothing_behind(setup):
+    _, _, make = setup
+    trader, api, store = make()
+    api.fail_with = PapertradeError("nope", 422, "invalid_signature", {"error": "invalid_signature"})
+    with pytest.raises(PapertradeError):
+        trader.open_pair("BTC", "10", 50, exit_plan=ExitPlan(max_hold_s=300))
+    assert store.read()["exit_plans"] == {} and store.read()["inflight"] == []

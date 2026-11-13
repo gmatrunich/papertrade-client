@@ -21,7 +21,7 @@ from typing import Any
 from eth_account import Account
 
 from . import drift, guards
-from .trader import GuardError, WriteResult
+from .trader import GuardError, PairBroken, WriteResult
 
 # A close waited 46 s for its batch on 2026-11-04; give live writes a minute and a half to settle.
 OUTCOME_WAIT_S = 90
@@ -293,21 +293,50 @@ def cmd_exits(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_probe(args: argparse.Namespace) -> int:
-    """One minimum-size trade with a random side, closed by the exit engine after --hold."""
-    from .exits import ExitPlan, read_heartbeat
+def _exit_engine_missing(client, args: argparse.Namespace) -> bool:
+    """A live probe opens only while the exit engine is running live: nothing else would close it."""
+    from .exits import read_heartbeat
 
-    client = _client(args)
     beat = read_heartbeat(client.store.dir)
     if args.live and client.config.live_trading and (not beat or beat.get("mode") != "live" or time.time() - beat["at"] > EXITS_FRESH_S):
         print("refused: the exit engine is not running live, nothing would close the probe", file=sys.stderr)
-        return 1
+        return True
+    return False
+
+
+def _minimum_trade(client) -> tuple[str, int]:
     trading = client.api.trading_state()
     margin = trading.minimum_trade_size_raw / 1e18
-    leverage = math.ceil(trading.minimum_open_notional_raw / trading.minimum_trade_size_raw)
+    return f"{margin:g}", math.ceil(trading.minimum_open_notional_raw / trading.minimum_trade_size_raw)
+
+
+def cmd_probe(args: argparse.Namespace) -> int:
+    """One minimum-size trade with a random side, closed by the exit engine after --hold."""
+    from .exits import ExitPlan
+
+    client = _client(args)
+    if _exit_engine_missing(client, args):
+        return 1
+    margin, leverage = _minimum_trade(client)
     side = secrets.choice(("long", "short"))
     plan = ExitPlan(max_hold_s=args.hold)
-    return _write(client.trader.open(args.market, side, f"{margin:g}", leverage, dry_run=not args.live, exit_plan=plan), client)
+    return _write(client.trader.open(args.market, side, margin, leverage, dry_run=not args.live, exit_plan=plan), client)
+
+
+def cmd_probe_pair(args: argparse.Namespace) -> int:
+    """A hedge: one long and one short at minimum size, closed together by the exit engine after --hold.
+
+    Needs ``PAPERTRADE_MAX_OPEN_POSITIONS`` of at least 2 and ``PAPERTRADE_MAX_TOTAL_MARGIN_USD`` of at
+    least twice the margin: the pair is held to the same limits as any two opens. A dry run shows what
+    the guards say and what the model expects the pair to lose at a few price moves."""
+    from .exits import ExitPlan
+
+    client = _client(args)
+    if _exit_engine_missing(client, args):
+        return 1
+    margin, leverage = _minimum_trade(client)
+    plan = ExitPlan(max_hold_s=args.hold)
+    return _write(client.trader.open_pair(args.market, margin, leverage, dry_run=not args.live, exit_plan=plan), client)
 
 
 def cmd_reconcile(args: argparse.Namespace) -> int:
@@ -423,6 +452,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--live", action="store_true")
     p.set_defaults(fn=cmd_probe)
 
+    p = sub.add_parser("probe-pair", help="hedge probe: one long and one short at minimum size, closed together after --hold")
+    p.add_argument("--market", choices=["BTC", "ETH"], default="BTC")
+    p.add_argument("--hold", type=_duration, default=300, help="close both after this long (default 5m)")
+    p.add_argument("--live", action="store_true")
+    p.set_defaults(fn=cmd_probe_pair)
+
     p = sub.add_parser("reconcile", help="audit log against the trade history: latency, slippage, payout")
     p.add_argument("--since", type=_duration, help="only positions closed within this window (24h)")
     p.add_argument("--digest", action="store_true", help="print the short text digest instead of JSON")
@@ -442,6 +477,9 @@ def main(argv: list[str] | None = None) -> int:
         return args.fn(args)
     except GuardError as error:
         _print({"refused": [dataclasses.asdict(v) for v in error.violations]})
+        return 1
+    except PairBroken as error:
+        _print({"pair_broken": str(error), "sent": dataclasses.asdict(error.result)})
         return 1
     except (ValueError, TimeoutError, FileExistsError) as error:
         print(f"error: {error}", file=sys.stderr)

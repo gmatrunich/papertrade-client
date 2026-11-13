@@ -3,6 +3,10 @@
 For every closed position: how long the relayer took to execute the open and the close, how far the
 fills were from Hyperliquid's mid when we signed the open or decided to exit, and whether the booked
 payout matches :mod:`payout`. Whatever does not line up is listed under ``discrepancies``.
+
+Hedge pairs (``papertrade probe-pair``) are also reported as pairs: whether both legs entered at the
+same price and closed in the same transaction, what the pair lost, and how much $PAPER the losing leg
+minted against the model (``paper_minted`` per ``paper_mint_basis``; basis is 98% of the loss).
 """
 
 from __future__ import annotations
@@ -62,8 +66,15 @@ def reconcile(
     closes: dict[int, list[dict[str, Any]]] = {}
     for e in audit:
         if e.get("event") == "submit" and e.get("action") == "openPosition":
-            opens[e["intent_id"]] = {"ts": _ts(e), "mid": e.get("mid"), "market": e.get("market"), "side": e.get("side"),
-                                     "margin_usd": float(e.get("margin_usd") or 0), "leverage": e.get("leverage")}  # fmt: skip
+            opens[e["intent_id"]] = {
+                "ts": _ts(e),
+                "mid": e.get("mid"),
+                "market": e.get("market"),
+                "side": e.get("side"),
+                "margin_usd": float(e.get("margin_usd") or 0),
+                "leverage": e.get("leverage"),
+                "pair": e.get("pair"),
+            }
         elif e.get("event") == "accepted" and e.get("action") == "openPosition":
             accepted.add(e["intent_id"])
         elif e.get("event") == "position" and e.get("intent_id"):
@@ -96,11 +107,18 @@ def reconcile(
             "exit": exit_,
             "pnl_usd": (int(t["adjustedPnlRaw"]) - int(t.get("userPaidFeeRaw") or 0)) / 1e18,
         }
+        if t.get("txHash"):
+            row["tx_hash"] = t["txHash"]
+        if t.get("paperMintedRaw") is not None:
+            row["paper_minted"] = int(t["paperMintedRaw"]) / 1e18
+            row["paper_mint_basis"] = int(t.get("paperMintBasisRaw") or 0) / 1e18
         intent = seen.get(pid) or _match_open(opens, t, used)
         if intent and intent in opens:
             used.add(intent)
             o = opens[intent]
             row["open_intent"] = intent
+            if o.get("pair"):
+                row["pair"] = o["pair"]
             row["open_latency_s"] = t["openedAtMs"] / 1000 - o["ts"]
             if o["mid"]:
                 row["entry_slippage_bps"] = sign * (entry - o["mid"]) / o["mid"] * 1e4  # positive: worse for us
@@ -127,7 +145,61 @@ def reconcile(
         o = opens.get(intent)
         if o and now_s - o["ts"] > deployment.INTENT_LIFETIME_S and (since_s is None or o["ts"] >= since_s):
             discrepancies.append(f"open {intent[:10]}… was accepted but no closed position matches it")
-    return {"positions": rows, "summary": _summary(rows), "discrepancies": discrepancies}
+    return {"positions": rows, "summary": _summary(rows), "pairs": _pairs(rows), "discrepancies": discrepancies}
+
+
+def _pairs(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One entry per hedge pair that has a closed position, oldest first."""
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        if r.get("pair"):
+            groups.setdefault(r["pair"], []).append(r)
+    out = []
+    for pair_id, legs in groups.items():
+        legs = sorted(legs, key=lambda r: r["closed_at"])
+        long = next((r for r in legs if r["side"] == "long"), None)
+        short = next((r for r in legs if r["side"] == "short"), None)
+        complete = bool(long and short and len(legs) == 2)
+        entry: dict[str, Any] = {"pair": pair_id, "positions": [r["position_id"] for r in legs], "complete": complete}
+        if not complete:
+            out.append(entry)  # a leg is still open, was refused, or was closed on its own
+            continue
+        mid = (long["entry"] + short["entry"]) / 2
+        pnl = long["pnl_usd"] + short["pnl_usd"]
+        loser = min((long, short), key=lambda r: r["pnl_usd"])
+        basis = sum(r.get("paper_mint_basis", 0.0) for r in legs)
+        minted = sum(r.get("paper_minted", 0.0) for r in legs)
+        entry |= {
+            "market": long["market"],
+            "margin_usd": long["margin_usd"],
+            "leverage": long["leverage"],
+            "opened_at": min(r["opened_at"] for r in legs),
+            "closed_at": max(r["closed_at"] for r in legs),
+            # Positive: the long entered above the short, which costs the pair that much (it is locked in).
+            "entry_gap_bps": (long["entry"] - short["entry"]) / mid * 1e4,
+            "exit_gap_bps": (long["exit"] - short["exit"]) / mid * 1e4,
+            "opened_gap_s": abs(long["opened_at"] - short["opened_at"]),
+            "same_entry": long["entry"] == short["entry"],
+            "same_close_tx": bool(long.get("tx_hash")) and long.get("tx_hash") == short.get("tx_hash"),
+            "kinds": [r["kind"] for r in legs],
+            "pnl_usd": pnl,
+            "loser_loss_usd": -loser["pnl_usd"],
+        }
+        models = [r.get("model_pnl_usd") for r in legs]
+        if all(m is not None for m in models):
+            entry["model_pnl_usd"] = sum(models)
+        if minted or basis:
+            entry["paper_mint_basis"] = basis
+            entry["paper_minted"] = minted
+            if basis > 0:
+                entry["paper_per_basis"] = minted / basis
+                entry["cost_per_basis_usd"] = -pnl / basis
+                # 0.98 = the loss less the 2% LP-side fee (1.0 for a liquidation). Lower would mean a win offset it.
+                entry["basis_per_loss"] = basis / -loser["pnl_usd"] if loser["pnl_usd"] < 0 else None
+            if minted > 0:
+                entry["cost_per_paper_usd"] = -pnl / minted
+        out.append(entry)
+    return sorted(out, key=lambda e: e.get("closed_at", 0))
 
 
 def _match_open(opens: dict[str, dict[str, Any]], trade: dict[str, Any], used: set[str]) -> str | None:
@@ -202,6 +274,25 @@ def digest(report: dict[str, Any], hours: float | None) -> str:
         f"papertrade reconcile ({window}): {s['positions']} positions, {s['wins']} wins, pnl ${s['pnl_usd']:+.2f}",
         f"open latency {fmt('open_latency_s', ' s')}; close latency {fmt('close_latency_s', ' s')}",
         f"entry slippage {fmt('entry_slippage_bps', ' bps')}; exit slippage {fmt('exit_slippage_bps', ' bps')}",
-        f"discrepancies: {len(report['discrepancies'])}" + "".join(f"\n• {d}" for d in report["discrepancies"][:10]),
     ]
+    if report.get("pairs"):
+        lines.append(_pairs_line(report["pairs"]))
+    lines.append(f"discrepancies: {len(report['discrepancies'])}" + "".join(f"\n• {d}" for d in report["discrepancies"][:10]))
     return "\n".join(lines)
+
+
+def _pairs_line(pairs: list[dict[str, Any]]) -> str:
+    done = [p for p in pairs if p["complete"]]
+    text = f"pairs: {len(done)} complete" + (f", {len(pairs) - len(done)} broken or open" if len(done) != len(pairs) else "")
+    if not done:
+        return text
+    minted = sum(p.get("paper_minted", 0.0) for p in done)
+    cost_basis = [p["cost_per_basis_usd"] for p in done if "cost_per_basis_usd" in p]
+    text += (
+        f", pnl ${sum(p['pnl_usd'] for p in done):+.2f}, same entry {sum(p['same_entry'] for p in done)}/{len(done)}, "
+        f"same close tx {sum(p['same_close_tx'] for p in done)}/{len(done)}, entry gap max "
+        f"{max(abs(p['entry_gap_bps']) for p in done):.1f} bps, PAPER minted {minted:,.1f}"
+    )
+    if cost_basis:
+        text += f", cost ${statistics.median(cost_basis):.2f} per $1 of mint basis (median)"
+    return text
