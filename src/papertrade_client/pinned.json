@@ -22,7 +22,7 @@
     ]
   },
   "bundle": {
-    "build_id": "38397c220121",
+    "build_id": "b36edb7ee53b",
     "deployment": {
       "addresses": {
         "depositProxyFactory": "0x1629b7d46bef6e13ff754174fc9f32dea309b38f",
@@ -71,10 +71,10 @@
     "latest_contract_set": 2
   },
   "implementations": {
-    "batchExecutor": "0xe0bc9cc7b067060aafccbaa3e250700c9cdd7262",
+    "batchExecutor": "0xd334f2fd8040e81dece418a10a17763764e0d1cc",
     "depositProxyFactory": "0x8f22a73a23a2de0dbfdf6729f4d8c07dbdc69cf0",
-    "exchange": "0x0a44049dbbb6b4762a6ba37aa0f7548c0b4a3723",
-    "paperStaking": "0xe6e3519455170913c5c3bfe541dd918a2d0cbb15",
+    "exchange": "0x4e2adafc40c734e9a8f96458b83ad62ad2b8a964",
+    "paperStaking": "0x5051436b7f103b195821b3c5678b0850529739b2",
     "paperToken": "0x433bd418ec92818a960585f4d5fae563e735bb4a",
     "sessionKeyManager": "0x0a2db5c7614b714fd9ec12b29bff3b4f4c545d82"
   },
