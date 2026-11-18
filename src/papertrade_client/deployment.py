@@ -17,7 +17,8 @@ HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
 
 # Proxies are the addresses to call; implementations are what the proxies run.
 EXCHANGE = "0x6cd5661646289fb6e65ea5c032310fded797d0a2"
-EXCHANGE_IMPLEMENTATION = "0x0a44049dbbb6b4762a6ba37aa0f7548c0b4a3723"
+# Upgraded on 2026-11-12 (timelock batch 0xa3b9cb48…); the frontend still names 0x0a44…3723 as exchangeNext.
+EXCHANGE_IMPLEMENTATION = "0x4e2adafc40c734e9a8f96458b83ad62ad2b8a964"
 BATCH_EXECUTOR = "0x233ff29b239abc1d7748605da9b205c3e008626e"
 SESSION_KEY_MANAGER = "0x8326eb8896e358717f10502ec73ce8d28e37b108"
 BUILDER_REGISTRY = "0xfdc6550436dd75ce8a0b145f935b7d3a64f53248"
