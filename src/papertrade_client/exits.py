@@ -8,6 +8,11 @@ also gets the safety stop: ``PAPERTRADE_EXIT_STOP_FRACTION`` of the entry-to-bus
 
 A close executes in the relayer's next batch: 7-46 s after submission on 2026-11-04. A close at or
 past the bust price settles as a liquidation, so stops have to sit well before bust.
+
+Hedge pairs (``trader.open_pair``): the plan record also carries ``pair = {"id", "legs"}`` (the two
+open intent ids). When either leg is due, both are closed in one ``Close`` intent, so they execute in
+the same batch at the same mark. A pair that has lost a leg (rejected, liquidated, never showed up
+within ``PAIR_GRACE_S``) is no longer a hedge: the surviving leg is closed at once.
 """
 
 from __future__ import annotations
@@ -34,6 +39,11 @@ RETRY_AFTER_S = 150  # a close that has not resolved by then is sent again (the 
 PLAN_RETENTION_S = 2 * 3600  # plans whose position is not open are dropped after this
 HEARTBEAT_EVERY_S = 10
 RENEW_EVERY_S = 3600
+# Both legs of a pair are submitted together, but the relayer may execute them seconds apart. A leg
+# whose partner is still not open this long after its own open is on its own.
+PAIR_GRACE_S = 90
+# Open intents that can never produce the missing leg.
+DEAD_INTENT_STATUSES = frozenset({"failed", "expired", "cancelled"})
 
 
 @dataclass(frozen=True)
@@ -111,25 +121,63 @@ class ExitEngine:
             return []
         trading = self.trader.api.trading_state(max_age_s=60)
         marks: dict[int, float] = {}
+
+        def mark_of(p: Position) -> float:
+            if p.instrument_id not in marks:
+                market = next(m for m in deployment.MARKETS.values() if m.instrument_id == p.instrument_id)
+                marks[p.instrument_id] = self.trader.hl.bbo(market.hl_coin).mid * trading.instrument(p.instrument_id).price_scale
+            return marks[p.instrument_id]
+
+        def due_entry(p: Position, reason: str) -> dict[str, Any]:
+            scale = trading.instrument(p.instrument_id).price_scale
+            return {"position_id": p.position_id, "reason": reason, "mark": mark_of(p) / scale, "position": p}
+
         due: list[dict[str, Any]] = []
+        pairs: dict[int, dict[str, Any]] = {}  # position_id -> {"id", "legs"} of positions that belong to a hedge pair
         for p in account.open_positions:
+            record = plans.get(p.intent_id or "")
+            if record and record.get("pair"):
+                pairs[p.position_id] = record["pair"]
             if p.position_id not in self.seen:
                 self.seen.add(p.position_id)
                 self.trader.audit.write("position", position_id=p.position_id, intent_id=p.intent_id, opened_at_ms=p.opened_at_ms)
             if self._still_closing(p.position_id, now):
                 continue
-            if p.instrument_id not in marks:
-                market = next(m for m in deployment.MARKETS.values() if m.instrument_id == p.instrument_id)
-                marks[p.instrument_id] = self.trader.hl.bbo(market.hl_coin).mid * trading.instrument(p.instrument_id).price_scale
-            record = plans.get(p.intent_id or "")
             plan = ExitPlan(**record["plan"]) if record else None
-            reason = trigger(p, plan, marks[p.instrument_id], now, self.trader.config.exit_stop_fraction)
+            reason = trigger(p, plan, mark_of(p), now, self.trader.config.exit_stop_fraction)
             if reason:
-                scale = trading.instrument(p.instrument_id).price_scale
-                due.append({"position_id": p.position_id, "reason": reason, "mark": marks[p.instrument_id] / scale, "position": p})
+                due.append(due_entry(p, reason))
+        due += self._pair_legs(account, due, pairs, due_entry, now)
         if due:
             self._close(due, now)
         return due
+
+    def _pair_legs(
+        self, account, due: list[dict[str, Any]], pairs: dict[int, dict[str, Any]], due_entry, now: float
+    ) -> list[dict[str, Any]]:
+        """Legs to close along with a due leg (same intent, same batch), or because their pair is broken."""
+        if not pairs:
+            return []
+        by_intent = {p.intent_id: p for p in account.open_positions if p.intent_id}
+        due_reason = {d["position_id"]: d["reason"] for d in due}
+        added: list[dict[str, Any]] = []
+        for p in account.open_positions:
+            pair = pairs.get(p.position_id)
+            if not pair or p.position_id in due_reason or p.position_id in self.closing:
+                continue
+            reason = None
+            for partner_intent in (i for i in pair["legs"] if i != p.intent_id):
+                partner = by_intent.get(partner_intent)
+                if partner is not None:
+                    if partner.position_id in due_reason:
+                        reason = f"pair:{due_reason[partner.position_id]}"
+                elif now - p.opened_at_ms / 1000 >= PAIR_GRACE_S or self.trader.intent_status(partner_intent) in DEAD_INTENT_STATUSES:
+                    reason = "pair_broken"
+            if reason:
+                entry = due_entry(p, reason)
+                due_reason[p.position_id] = reason
+                added.append(entry)
+        return added
 
     def _still_closing(self, position_id: int, now: float) -> bool:
         pending = self.closing.get(position_id)

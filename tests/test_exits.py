@@ -134,3 +134,78 @@ def test_open_stores_the_exit_plan_only_when_live(engine):
     eng, _, store, _ = engine(live=False)
     eng.trader.open("BTC", "long", "10", 50, exit_plan=ExitPlan(max_hold_s=300))
     assert store.read()["exit_plans"] == {}
+
+
+# -- hedge pairs ------------------------------------------------------------------
+
+LEGS = ["0xaa", "0xbb"]
+
+
+def pair_plans(max_hold_s=None, created=NOW - 600):
+    plan = {"stop_pct": None, "take_pct": None, "max_hold_s": max_hold_s}
+    record = {"plan": plan, "created_at": created, "pair": {"id": "p1", "legs": LEGS}}
+    return {intent: dict(record) for intent in LEGS}
+
+
+def pair_positions(age_s=600, both=True):
+    ts = int((NOW - age_s) * 1000)
+    long = position_tuple(position_id=1, is_long=True, intent_id="0xaa")[:8] + [ts, "0xaa"]
+    short = position_tuple(position_id=2, is_long=False, bust_raw=790_000, intent_id="0xbb")[:8] + [ts, "0xbb"]
+    return [long, short] if both else [long]
+
+
+def closed_ids(api):
+    return [sorted(int(i) for i in signed["positionIds"]) for action, signed, *_ in api.submitted if action == "closePositions"]
+
+
+def test_one_due_leg_closes_both_in_one_intent(engine):
+    # The market is 1% down: the long is half way to bust (safety stop); the short is winning and not due.
+    eng, api, _, _ = engine(positions=pair_positions(), plans=pair_plans(), mid=76_700.0)
+    due = eng.tick()
+    assert {d["position_id"]: d["reason"] for d in due} == {1: "safety_stop", 2: "pair:safety_stop"}
+    assert closed_ids(api) == [[1, 2]]  # one Close intent: the same batch, the same mark
+    assert eng.tick() == [] and len(api.submitted) == 1  # both legs count as closing
+
+
+def test_both_legs_due_by_the_holding_limit_close_together(engine):
+    eng, api, _, _ = engine(positions=pair_positions(), plans=pair_plans(max_hold_s=300))
+    assert {d["reason"] for d in eng.tick()} == {"max_hold"}
+    assert closed_ids(api) == [[1, 2]]
+
+
+def test_a_quiet_pair_is_left_alone(engine):
+    eng, api, _, _ = engine(positions=pair_positions(age_s=100), plans=pair_plans(max_hold_s=300))
+    assert eng.tick() == [] and api.submitted == []
+
+
+def test_a_leg_whose_partner_is_gone_closes_after_the_grace(engine):
+    # The partner was liquidated or closed on its own: what is left is no longer a hedge.
+    eng, api, _, _ = engine(positions=pair_positions(age_s=exits.PAIR_GRACE_S + 1, both=False), plans=pair_plans())
+    assert [d["reason"] for d in eng.tick()] == ["pair_broken"]
+    assert closed_ids(api) == [[1]]
+
+
+def test_a_young_leg_waits_for_its_partner_to_show(engine):
+    eng, api, _, _ = engine(positions=pair_positions(age_s=10, both=False), plans=pair_plans())
+    assert eng.tick() == [] and api.submitted == []
+
+
+def test_a_young_leg_whose_partner_was_refused_closes_at_once(engine):
+    eng, api, _, _ = engine(positions=pair_positions(age_s=10, both=False), plans=pair_plans())
+    eng.trader.stream.outcomes.intents["0xbb"] = "failed"
+    assert [d["reason"] for d in eng.tick()] == ["pair_broken"]
+    assert closed_ids(api) == [[1]]
+
+
+def test_a_refused_open_leaves_a_survivor_that_closes_as_soon_as_it_shows(engine):
+    # open_pair sets max_hold_s=0 on the surviving leg when the other was refused.
+    plans = pair_plans(max_hold_s=0)
+    plans.pop("0xbb")
+    eng, api, _, _ = engine(positions=pair_positions(age_s=2, both=False), plans=plans)
+    assert [d["reason"] for d in eng.tick()] == ["max_hold"]
+
+
+def test_positions_outside_a_pair_ignore_the_pair_logic(engine):
+    plans = {"0xaa": {"plan": {"stop_pct": None, "take_pct": None, "max_hold_s": None}, "created_at": NOW - 600}}
+    eng, api, _, _ = engine(positions=held(), plans=plans)
+    assert eng.tick() == [] and api.submitted == []

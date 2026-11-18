@@ -12,8 +12,10 @@ past the limits. Closes take no lock and never wait on market data.
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import logging
+import secrets
 import threading
 import time
 from collections.abc import Callable
@@ -38,7 +40,7 @@ log = logging.getLogger(__name__)
 
 MIN_WITHDRAW_USDC = 10
 
-__all__ = ["GuardError", "Submission", "Trader", "WriteResult"]
+__all__ = ["GuardError", "PairBroken", "Submission", "Trader", "WriteResult", "pair_cost_curve"]
 
 
 @dataclass
@@ -58,6 +60,34 @@ class WriteResult:
     violations: list[guards.Violation] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     quote: dict[str, Any] | None = None
+
+
+class PairBroken(Exception):
+    """One leg of a hedge pair was refused after the other was sent. The surviving leg carries a plan
+    that closes it as soon as it shows; ``result`` has the submissions that did go out."""
+
+    def __init__(self, message: str, result: WriteResult):
+        super().__init__(message)
+        self.result = result
+
+
+def pair_cost_curve(keep_curve: list[dict[str, Any]], notional_usd: float) -> list[dict[str, Any]]:
+    """What a hedge pair loses if the price ends ``move_pct`` away, from one leg's ``keep_curve``.
+
+    The leg on the right side wins ``payout_usd``; the other loses the raw move in full. Entry and exit
+    are assumed identical for both legs, and neither leg reaches its bust price."""
+    out = []
+    for point in keep_curve:
+        raw = notional_usd * point["move_pct"] / 100
+        out.append(
+            {
+                "move_pct": point["move_pct"],
+                "net_usd": point["payout_usd"] - raw,
+                "net_bps_of_leg": (point["payout_usd"] - raw) / notional_usd * 1e4,
+                "loser_loss_usd": raw,
+            }
+        )
+    return out
 
 
 class Trader:
@@ -317,6 +347,44 @@ class Trader:
 
     # -- writes -------------------------------------------------------------------
 
+    def _open_check(
+        self, m, side: str, margin_raw: int, leverage: int, trading, instrument, bbo, extra_opens: int = 0, extra_margin_raw: int = 0
+    ) -> tuple[list[guards.Violation], dict[str, Any]]:
+        """Guard violations for one open, and its unsigned message. ``extra_*`` count opens that are about
+        to be sent together with this one (the first leg of a pair) but are not in flight yet."""
+        inflight = [i for i in self.inflight() if i["action"] == "openPosition"]
+        violations = guards.check_open(
+            guards.OpenCheck(
+                margin_raw=margin_raw,
+                leverage=leverage,
+                is_long=side == "long",
+                instrument=instrument,
+                trading=trading,
+                account=self.stream.state(),
+                account_age_s=self.stream.age_s(),
+                session_valid_for_s=self.session.status().valid_for_s,
+                kill_switch=self.store.kill_switch()["engaged"],
+                realized_today_raw=self.realized_today_raw(),
+                mid_price=bbo.mid,
+                limits=self.config.limits,
+                snapshot_max_age_s=self.config.snapshot_max_age_s,
+                now_s=self.clock(),
+                inflight_opens=len(inflight) + extra_opens,
+                inflight_margin_raw=sum(int(i["margin_raw"] or 0) for i in inflight) + extra_margin_raw,
+            )
+        )
+        message = {
+            "user": self.wallet.address,
+            "instrumentId": m.instrument_id,
+            "isLong": side == "long",
+            "size": margin_raw,
+            "leverage": leverage,
+            "useDebt": False,
+            "nonce": 0,
+            "deadline": protocol.deadline(self.clock()),
+        }
+        return violations, message
+
     def open(
         self,
         market: str,
@@ -339,38 +407,7 @@ class Trader:
         quote = {"bid": bbo.bid, "ask": bbo.ask, "mid": bbo.mid}
 
         def evaluate() -> tuple[list[guards.Violation], dict[str, Any]]:
-            inflight = [i for i in self.inflight() if i["action"] == "openPosition"]
-            violations = guards.check_open(
-                guards.OpenCheck(
-                    margin_raw=margin_raw,
-                    leverage=leverage,
-                    is_long=side == "long",
-                    instrument=instrument,
-                    trading=trading,
-                    account=self.stream.state(),
-                    account_age_s=self.stream.age_s(),
-                    session_valid_for_s=self.session.status().valid_for_s,
-                    kill_switch=self.store.kill_switch()["engaged"],
-                    realized_today_raw=self.realized_today_raw(),
-                    mid_price=bbo.mid,
-                    limits=self.config.limits,
-                    snapshot_max_age_s=self.config.snapshot_max_age_s,
-                    now_s=self.clock(),
-                    inflight_opens=len(inflight),
-                    inflight_margin_raw=sum(int(i["margin_raw"] or 0) for i in inflight),
-                )
-            )
-            message = {
-                "user": self.wallet.address,
-                "instrumentId": m.instrument_id,
-                "isLong": side == "long",
-                "size": margin_raw,
-                "leverage": leverage,
-                "useDebt": False,
-                "nonce": 0,
-                "deadline": protocol.deadline(self.clock()),
-            }
-            return violations, message
+            return self._open_check(m, side, margin_raw, leverage, trading, instrument, bbo)
 
         if not live:
             violations, message = evaluate()
@@ -395,6 +432,109 @@ class Trader:
                 signed, market=market, side=side, margin_usd=str(margin_usd), leverage=leverage, mid=bbo.mid, exit_plan=plan
             )
             return WriteResult("live", "openPosition", signed.unsigned(), [submission], quote=quote)
+
+    def open_pair(
+        self,
+        market: str,
+        margin_usd: str | float,
+        leverage: int,
+        dry_run: bool | None = None,
+        exit_plan: ExitPlan | None = None,
+    ) -> WriteResult:
+        """A hedge: one long and one short of the same market, margin and leverage, sent together.
+
+        Both legs are checked against the guards before either is signed (the second counts the first
+        as in flight), so a refusal sends nothing. Their intents are submitted from two threads to
+        keep the gap between them small. Each carries ``exit_plan`` plus the pair record, so the exit
+        engine closes both legs in one intent. If one leg is refused after the other went out, the
+        survivor's plan is set to close as soon as it shows and :class:`PairBroken` is raised."""
+        m = deployment.MARKETS[market]
+        live = self._live(dry_run)
+        margin_raw = parse_usd(margin_usd)
+        trading = self.api.trading_state()
+        instrument = trading.instrument(m.instrument_id)
+        bbo = self.hl.bbo(m.hl_coin)
+        quote: dict[str, Any] = {"bid": bbo.bid, "ask": bbo.ask, "mid": bbo.mid}
+        pair_id = secrets.token_hex(8)
+
+        def evaluate() -> tuple[list[guards.Violation], dict[str, Any], dict[str, Any]]:
+            first, long_message = self._open_check(m, "long", margin_raw, leverage, trading, instrument, bbo)
+            second, short_message = self._open_check(
+                m, "short", margin_raw, leverage, trading, instrument, bbo, extra_opens=1, extra_margin_raw=margin_raw
+            )
+            unique = {(v.code, v.message): v for v in first + second}
+            return list(unique.values()), long_message, short_message
+
+        if not live:
+            violations, long_message, short_message = evaluate()
+            message = {
+                "pair": pair_id,
+                "long": protocol.preview("OpenPosition", long_message).unsigned(),
+                "short": protocol.preview("OpenPosition", short_message).unsigned(),
+            }
+            quote["pair_cost_curve"] = pair_cost_curve(
+                self.quote(market, "long", margin_usd, leverage)["keep_curve"], to_float(margin_raw) * leverage
+            )
+            return WriteResult("dry-run", "openPair", message, violations=violations, quote=quote)
+
+        with self.lock:
+            violations, long_message, short_message = evaluate()
+            if violations:
+                raise GuardError(violations)
+            signer = self.session.signer()
+            if signer is None:
+                raise GuardError([guards.Violation("session_invalid", "no registered session key")])
+            long_message["nonce"] = self.store.take_nonce("exchange", deployment.EXCHANGE, self.wallet.address)
+            short_message["nonce"] = self.store.take_nonce("exchange", deployment.EXCHANGE, self.wallet.address)
+            signed = {
+                "long": protocol.sign(signer, "OpenPosition", long_message),
+                "short": protocol.sign(signer, "OpenPosition", short_message),
+            }
+            legs = [signed["long"].intent_id, signed["short"].intent_id]
+            plan = dataclasses.asdict(exit_plan) if exit_plan else {"stop_pct": None, "take_pct": None, "max_hold_s": None}
+            record = {"plan": plan, "created_at": self.clock(), "pair": {"id": pair_id, "legs": legs}}
+            # Before submitting, so the engine can never see a leg without its plan and its partner.
+            self.store.update(lambda s: [s["exit_plans"].__setitem__(i, copy.deepcopy(record)) for i in legs])
+            self.audit.write("pair", pair=pair_id, market=market, margin_usd=str(margin_usd), leverage=leverage, mid=bbo.mid, legs=legs)
+
+            outcomes: dict[str, Submission | Exception] = {}
+
+            def send(side: str) -> None:
+                try:
+                    outcomes[side] = self._submit(
+                        signed[side], market=market, side=side, margin_usd=str(margin_usd), leverage=leverage, mid=bbo.mid,
+                        exit_plan=plan, pair=pair_id,
+                    )  # fmt: skip
+                except Exception as error:
+                    outcomes[side] = error
+
+            threads = [threading.Thread(target=send, args=(side,), name=f"papertrade-open-{side}") for side in ("long", "short")]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            failed = {side: o for side, o in outcomes.items() if isinstance(o, Exception)}
+            sent = [outcomes[side] for side in ("long", "short") if side in outcomes and side not in failed]
+            message = {"pair": pair_id, "long": signed["long"].unsigned(), "short": signed["short"].unsigned()}
+            result = WriteResult("live", "openPair", message, sent, quote=quote)
+            if not failed:
+                return result
+            survivors = [signed[side].intent_id for side in signed if side not in failed]
+
+            def settle_broken(state: dict[str, Any]) -> None:
+                for side in failed:
+                    state["exit_plans"].pop(signed[side].intent_id, None)
+                for intent_id in survivors:
+                    if intent_id in state["exit_plans"]:
+                        state["exit_plans"][intent_id]["plan"]["max_hold_s"] = 0  # close as soon as it shows
+
+            self.store.update(settle_broken)
+            self.audit.write("pair_broken", pair=pair_id, failed={side: repr(e) for side, e in failed.items()}, surviving=survivors)
+            if not survivors:
+                raise next(iter(failed.values()))
+            side, error = next(iter(failed.items()))
+            raise PairBroken(f"{side} leg refused ({error}); the other leg closes as soon as it shows", result)
 
     def close(
         self, position_ids: list[int], dry_run: bool | None = None, force: bool = False, context: dict[str, Any] | None = None
