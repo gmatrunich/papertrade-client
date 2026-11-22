@@ -341,6 +341,7 @@ ACCOUNT_KEYS = frozenset(
         "operations",
         "openPositions",
         "oiCaps",
+        "recentNonces",  # {"session": ..., "paper": ...}: seen on empty accounts as nulls; semantics undocumented, so unused
     }
 )
 
@@ -413,7 +414,7 @@ def _state_fields(frame: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-_SNAPSHOT_REQUIRED = ACCOUNT_KEYS - {"walletRevision", "queueRevision", "queueNodeCount", "paper", "oiCaps"}
+_SNAPSHOT_REQUIRED = ACCOUNT_KEYS - {"walletRevision", "queueRevision", "queueNodeCount", "paper", "oiCaps", "recentNonces"}
 
 
 def parse_account_snapshot(frame: dict[str, Any]) -> AccountState:

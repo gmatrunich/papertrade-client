@@ -27,6 +27,15 @@ def test_unknown_trading_keys_are_kept(trading_frame):
     assert wire.parse_trading_state(trading_frame).unknown_keys == {"somethingNew"}
 
 
+def test_snapshot_tolerates_recent_nonces():
+    frame = account_frame()
+    without = wire.parse_account_snapshot(frame)
+    frame["recentNonces"] = {"session": None, "paper": None}
+    with_nonces = wire.parse_account_snapshot(frame)
+    assert with_nonces.raw_state["recentNonces"] == {"session": None, "paper": None}
+    assert with_nonces.balance == without.balance
+
+
 def test_snapshot_and_patch():
     snapshot = wire.parse_account_snapshot(
         account_frame(positions=[position_tuple(1), position_tuple(2)], session_keys=[["0x" + "ab" * 20, "1800000000"]])
