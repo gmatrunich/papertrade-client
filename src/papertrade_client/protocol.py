@@ -59,6 +59,31 @@ INTENT_TYPES: dict[str, tuple[Field, ...]] = {
     "CancelIntent": (("user", "address"), ("intentId", "bytes32"), ("deadline", "uint256")),
 }
 
+# Types the frontend bundle defines that this client deliberately does not implement: the "paperGames" product
+# (its deployment address is still null in the bundle) and StakeDebit (no domain assigned in the bundle, never seen
+# in a BatchExecutor call). There is no signing, domain or action mapping for them. The drift monitor tracks
+# their fields so a change shows up, but they are not reported as new.
+UNSUPPORTED_TYPES: dict[str, tuple[Field, ...]] = {
+    "StakeDebit": (
+        ("user", "address"),
+        ("listed", "address"),
+        ("amount", "uint256"),
+        ("terms", "bytes32"),
+        ("nonce", "uint256"),
+        ("deadline", "uint64"),
+    ),
+    "GameSession": (("key", "address"), ("expiry", "uint64")),
+    "GameBet": (
+        ("session", "uint32"),
+        ("game", "uint16"),
+        ("round", "uint32"),
+        ("size", "uint48"),
+        ("number", "uint48"),
+    ),
+    "GameEnd": (("session", "uint32"),),
+    "GameClose": (("session", "uint32"), ("finalBalance", "uint256"), ("list", "bytes")),
+}
+
 # The relayer's name for each intent type.
 ACTIONS: dict[str, str] = {
     "RegisterSessionKey": "registerSessionKey",

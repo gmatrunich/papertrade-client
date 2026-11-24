@@ -23,7 +23,7 @@
     ]
   },
   "bundle": {
-    "build_id": "60600090216c",
+    "build_id": "657653c5b017",
     "deployment": {
       "addresses": {
         "depositProxyFactory": "0x1629b7d46bef6e13ff754174fc9f32dea309b38f",
@@ -59,6 +59,10 @@
       ],
       "exchange": [
         "String",
+        "1"
+      ],
+      "paperGames": [
+        "PaperGames",
         "1"
       ],
       "paperStaking": [

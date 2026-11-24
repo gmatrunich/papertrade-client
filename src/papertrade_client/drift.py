@@ -313,7 +313,11 @@ def compare(pinned: dict[str, Any], observed: dict[str, Any], errors: list[Findi
             if name not in b["typed_data"]:
                 report.add("bundle.typed_data", "breaking", f"`{name}` is gone from the frontend's typed data")
             elif name not in ours:
-                report.add("bundle.typed_data", "warn", f"new intent type `{name}` in the frontend", b["typed_data"][name])
+                known = protocol.UNSUPPORTED_TYPES.get(name)
+                if known is None:
+                    report.add("bundle.typed_data", "warn", f"new intent type `{name}` in the frontend", b["typed_data"][name])
+                elif [list(f) for f in known] != b["typed_data"][name]:
+                    report.add("bundle.typed_data", "warn", f"unsupported type `{name}` fields changed", b["typed_data"][name])
             elif ours[name] != b["typed_data"][name]:
                 report.add("bundle.typed_data", "breaking", f"`{name}` fields changed", {"ours": ours[name], "live": b["typed_data"][name]})
         for diff in _diff(pb["domains"], b["domains"]):
