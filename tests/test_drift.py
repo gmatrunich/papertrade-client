@@ -127,3 +127,17 @@ def test_sse_parser_and_stream_reducer():
     assert stream.state() is None and stream.age_s() is not None
     stream.handle("wallet", json.dumps(account_frame()))
     assert stream.state().balance == 100 * 10**18
+
+
+def test_known_unsupported_types_are_not_new():
+    pinned = drift.load_pinned()
+    observed = observed_from_pinned(pinned)
+    for name, fields in protocol.UNSUPPORTED_TYPES.items():
+        observed["bundle"]["typed_data"][name] = [list(f) for f in fields]
+    assert drift.compare(pinned, observed, []).exit_code() == 0
+    observed["bundle"]["typed_data"]["GameBet"].append(["extra", "uint8"])
+    observed["bundle"]["typed_data"]["GameMint"] = [["session", "uint32"]]
+    report = drift.compare(pinned, observed, [])
+    assert report.exit_code() == 1
+    text = report.markdown()
+    assert "GameBet" in text and "GameMint" in text and "StakeDebit" not in text

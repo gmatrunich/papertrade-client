@@ -17,12 +17,13 @@
       "queueNodeCount",
       "queueRevision",
       "queued",
+      "recentNonces",
       "sessionKeys",
       "walletRevision"
     ]
   },
   "bundle": {
-    "build_id": "b36edb7ee53b",
+    "build_id": "8f9353a851bb",
     "deployment": {
       "addresses": {
         "depositProxyFactory": "0x1629b7d46bef6e13ff754174fc9f32dea309b38f",
@@ -58,6 +59,10 @@
       ],
       "exchange": [
         "String",
+        "1"
+      ],
+      "paperGames": [
+        "PaperGames",
         "1"
       ],
       "paperStaking": [
