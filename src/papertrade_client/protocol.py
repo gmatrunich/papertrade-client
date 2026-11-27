@@ -82,6 +82,20 @@ UNSUPPORTED_TYPES: dict[str, tuple[Field, ...]] = {
     ),
     "GameEnd": (("session", "uint32"),),
     "GameClose": (("session", "uint32"), ("finalBalance", "uint256"), ("list", "bytes")),
+    "GameRollover": (
+        ("session", "uint32"),
+        ("finalBalance", "uint256"),
+        ("withdraw", "uint256"),
+        ("nextKey", "address"),
+        ("nextExpiry", "uint64"),
+        ("list", "bytes"),
+    ),
+    "SetPayGas": (
+        ("user", "address"),
+        ("enabled", "bool"),
+        ("nonce", "uint256"),
+        ("deadline", "uint64"),
+    ),
 }
 
 # The relayer's name for each intent type.
